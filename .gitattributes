@@ -1,0 +1,8 @@
+# macOS / Xcode で扱うプロジェクトのため、テキストは LF に統一する。
+* text=auto eol=lf
+
+# バイナリ扱いにするもの
+*.png binary
+*.jpg binary
+*.pdf binary
+*.xcassets/** binary
