@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # objectVersion 77 / PBXFileSystemSynchronizedRootGroup のため Xcode 16 系が必須。
       # 'latest-stable' は将来 Xcode 26 系を選びうるため、メジャー版 '16' に固定する

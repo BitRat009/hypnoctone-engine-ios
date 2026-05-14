@@ -44,7 +44,8 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] GitHub Actions ワークフロー追加（`.github/workflows/ios-build.yml`）
       - macOS-15 ランナー + Xcode 16.x で push/PR ごとにシミュレータ向けビルド確認
       - Codex レビュー済み（`xcode-version` を `'16'` 固定に修正）
-- [ ] GitHub にリポジトリを push（Actions を起動するため）
+- [x] GitHub にリポジトリを push（https://github.com/BitRat009/hypnoctone-engine-ios, private）
+- [x] **CI でビルド検証成功** — 手書き pbxproj が Xcode 16 で実ビルド可能と実証（run #1, 41s）
 - [ ] 対話的確認が必要なとき: 時間課金のクラウド Mac（MacinCloud / Scaleway 等）か
       Codemagic 無料枠でシミュレータ実行・UI/音の確認
 - [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信
