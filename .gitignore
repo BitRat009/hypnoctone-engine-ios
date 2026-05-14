@@ -22,3 +22,20 @@ Package.resolved
 # CocoaPods / Carthage（未使用だが将来用）
 Pods/
 Carthage/Build/
+
+# 署名・秘密情報（public リポジトリでは絶対にコミットしない）
+# 証明書・鍵・プロビジョニングプロファイルは GitHub Actions の Secrets に保管する
+*.p12
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.p8
+*.keychain
+*.keychain-db
+
+# 環境変数・認証情報
+.env
+*.env
+.env.local
+secrets/
