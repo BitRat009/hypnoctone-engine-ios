@@ -1,0 +1,43 @@
+name: iOS Build
+
+# Windows 環境では Xcode ビルドを検証できないため、
+# push / PR のたびに GitHub の macOS ランナー（クラウド Mac）上で
+# プロジェクトがコンパイル可能かを自動確認する。
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (iOS Simulator)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # objectVersion 77 / PBXFileSystemSynchronizedRootGroup のため Xcode 16 系が必須。
+      # 'latest-stable' は将来 Xcode 26 系を選びうるため、メジャー版 '16' に固定する
+      # （最新の 16.x が選ばれ、patch 版がイメージから削除されても壊れにくい）。
+      - name: Select Xcode 16.x
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16'
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Build for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project HypnoctoneEngine.xcodeproj \
+            -scheme HypnoctoneEngine \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO

@@ -37,3 +37,14 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - 実機ビルド時は Xcode で Signing > Team を選択（`DEVELOPMENT_TEAM` 未設定のため）
 - この環境（Windows）では Xcode ビルド検証は不可。Mac での実機確認が必要
 - 背景再生（画面ロック中の継続再生）は未対応。必要なら後続タスクで `UIBackgroundModes` を追加
+
+## 検証環境（Windows 開発 / クラウド Mac 中心）
+開発機は Windows、手持ちの Mac は旧 OS で Xcode 不可。検証はクラウドで行う方針。
+
+- [x] GitHub Actions ワークフロー追加（`.github/workflows/ios-build.yml`）
+      - macOS-15 ランナー + Xcode 16.x で push/PR ごとにシミュレータ向けビルド確認
+      - Codex レビュー済み（`xcode-version` を `'16'` 固定に修正）
+- [ ] GitHub にリポジトリを push（Actions を起動するため）
+- [ ] 対話的確認が必要なとき: 時間課金のクラウド Mac（MacinCloud / Scaleway 等）か
+      Codemagic 無料枠でシミュレータ実行・UI/音の確認
+- [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信
