@@ -1,0 +1,175 @@
+# Codemagic: iOS シミュレータでアプリを実際に起動し、画面と 440Hz サイン波を
+# 録画＋スクリーンショットでキャプチャして Web UI から確認できるようにする。
+#
+# 開発環境が Windows のため Xcode/シミュレータをローカルで動かせない。
+# GitHub Actions の iOS Build はコンパイル可否しか見ないので、ここでは
+# 「実際に動かして UI/音を確かめる」を担う。
+#
+# 想定: Free tier の mac_mini_m2（M2 Apple silicon, 500 min/月）。
+# 1 ラン 5 分未満を目安にしている。
+
+workflows:
+  ios-simulator-preview:
+    name: iOS Simulator Preview (UI + 音)
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      # Xcode 16 系を使う（pbxproj が objectVersion 77 + PBXFileSystemSynchronizedRootGroup のため）。
+      # Codemagic はメジャー版指定を受け付けないので具体的な patch を固定する。
+      # イメージから 16.4 が消えたら次の 16.x（16.5 等）に差し替える運用。
+      xcode: 16.4
+      vars:
+        SCHEME: "HypnoctoneEngine"
+        BUNDLE_ID: "com.hypnoctone.HypnoctoneEngine"
+        DERIVED_DATA: "build"
+        ARTIFACTS_DIR: "artifacts"
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+
+    scripts:
+      - name: Show toolchain
+        script: |
+          set -euo pipefail
+          xcodebuild -version
+          xcode-select -p
+          xcrun simctl --version || true
+
+      - name: Build for iOS Simulator
+        script: |
+          set -euo pipefail
+          set -o pipefail
+          xcodebuild build \
+            -project HypnoctoneEngine.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Pick & boot simulator
+        script: |
+          set -euo pipefail
+          # シミュレータ選択方針: iPhone 16 系を最優先、無ければ最新 iOS runtime の任意の iPhone。
+          # 画面サイズや UI の見え方を安定させるため決定的に選ぶ。
+          DEVICE_UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)['devices']
+          cands = []
+          for runtime, lst in data.items():
+              if 'SimRuntime.iOS' not in runtime:
+                  continue
+              for dev in lst:
+                  if dev.get('isAvailable') and 'iPhone' in dev.get('name', ''):
+                      cands.append((runtime, dev))
+          assert cands, 'no available iPhone simulator'
+          preferred = [c for c in cands if 'iPhone 16' in c[1]['name']]
+          chosen = preferred[0] if preferred else sorted(cands, key=lambda c: c[0], reverse=True)[0]
+          print(chosen[1]['udid'])
+          ")
+          echo "Booting simulator: $DEVICE_UDID"
+          xcrun simctl boot "$DEVICE_UDID" || true
+          xcrun simctl bootstatus "$DEVICE_UDID" -b
+          # 後続ステップで使うため Codemagic の env ファイルへ書き出し
+          echo "DEVICE_UDID=$DEVICE_UDID" >> "$CM_ENV"
+
+      - name: Install app
+        script: |
+          set -euo pipefail
+          APP_PATH=$(find "$DERIVED_DATA/Build/Products" -name "$SCHEME.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "App bundle not found under $DERIVED_DATA/Build/Products"
+            exit 1
+          fi
+          echo "Installing: $APP_PATH"
+          xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
+
+      - name: Capture video + screenshots
+        script: |
+          set -euo pipefail
+          mkdir -p "$ARTIFACTS_DIR"
+
+          # 録画開始（音声も同一 mp4 に含まれることを期待。後段で ffprobe 検査）
+          xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 "$ARTIFACTS_DIR/preview.mp4" &
+          REC_PID=$!
+
+          # 失敗時にも録画を確実に flush する。途中で screenshot 等が失敗しても
+          # ファイルが 0 バイトのまま終わらないようにする。
+          cleanup() {
+            xcrun simctl terminate "$DEVICE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+            if kill -0 "$REC_PID" >/dev/null 2>&1; then
+              kill -SIGINT "$REC_PID" >/dev/null 2>&1 || true
+              wait "$REC_PID" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          # 録画プロセスが SIGINT を受け取れるよう少し待つ
+          sleep 1
+
+          # アプリ起動。SIMCTL_CHILD_ プレフィックスは simctl が剥がして子プロセスに環境変数として渡す。
+          # MainView.handleCIAutostart() がこれを見て自動再生を開始する。
+          SIMCTL_CHILD_CI_AUTOSTART=1 \
+            xcrun simctl launch --console "$DEVICE_UDID" "$BUNDLE_ID" \
+            > "$ARTIFACTS_DIR/app-stdout.log" 2>&1 &
+          LAUNCH_PID=$!
+
+          # 1) 起動直後（自動再生はまだ走らない遅延中）
+          sleep 1
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/01-launch.png"
+
+          # 2) 自動再生開始後（handleCIAutostart の 1.5s 遅延が明けた頃）
+          sleep 3
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/02-playing.png"
+
+          # 3) 数秒継続再生したあと（PulseView のアニメーション差分を見る）
+          sleep 4
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/03-still-playing.png"
+
+          # 明示停止（trap でも回収されるが二重 kill は安全）
+          xcrun simctl terminate "$DEVICE_UDID" "$BUNDLE_ID" || true
+          sleep 1
+          kill -SIGINT "$REC_PID" || true
+          wait "$REC_PID" || true
+          wait "$LAUNCH_PID" || true
+
+          ls -la "$ARTIFACTS_DIR"
+
+      - name: Verify capture (audio stream check)
+        script: |
+          set -euo pipefail
+          # recordVideo が音声トラックを含むかは公式に保証されていない。
+          # 検査して見つからなければ警告のみ（スクリーンショット & ログは取れているのでビルドは fail しない）。
+          if ! command -v ffprobe >/dev/null 2>&1; then
+            echo "ffprobe not available; skipping mp4 audio inspection."
+            exit 0
+          fi
+          PREVIEW="$ARTIFACTS_DIR/preview.mp4"
+          if [ ! -s "$PREVIEW" ]; then
+            echo "WARNING: $PREVIEW is empty or missing."
+            exit 0
+          fi
+          echo "--- ffprobe streams ---"
+          ffprobe -v error -show_streams "$PREVIEW" || true
+          AUDIO_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$PREVIEW" | wc -l | tr -d ' ')
+          echo "Audio streams: $AUDIO_STREAMS"
+          if [ "$AUDIO_STREAMS" -eq 0 ]; then
+            echo "WARNING: preview.mp4 に音声トラックが見つからない。録画方式の見直しが必要かもしれない。"
+          else
+            echo "OK: preview.mp4 contains audio."
+          fi
+
+      - name: Shutdown simulator
+        script: |
+          xcrun simctl shutdown "$DEVICE_UDID" || true
+
+    artifacts:
+      - artifacts/*.mp4
+      - artifacts/*.png
+      - artifacts/*.log
+      - build/Logs/**/*.log

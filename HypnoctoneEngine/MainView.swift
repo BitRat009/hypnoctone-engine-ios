@@ -27,6 +27,20 @@ struct MainView: View {
             .padding(.vertical, 56)
         }
         .preferredColorScheme(.dark)
+        .onAppear(perform: handleCIAutostart)
+    }
+
+    /// CI（Codemagic 等）からの自動再生フック。
+    ///
+    /// 通常起動では何もしない。`CI_AUTOSTART` 環境変数が設定されている場合のみ、
+    /// UI が落ち着いた頃合いで自動的に再生を開始する。これは録画＋音声キャプチャで
+    /// 440Hz サイン波を確認するための仕掛けで、本番ビルドには影響しない。
+    private func handleCIAutostart() {
+        guard ProcessInfo.processInfo.environment["CI_AUTOSTART"] != nil else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            viewModel.start()
+        }
     }
 
     // MARK: - 構成要素

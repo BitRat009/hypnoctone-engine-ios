@@ -44,8 +44,14 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] GitHub Actions ワークフロー追加（`.github/workflows/ios-build.yml`）
       - macOS-15 ランナー + Xcode 16.x で push/PR ごとにシミュレータ向けビルド確認
       - Codex レビュー済み（`xcode-version` を `'16'` 固定に修正）
-- [x] GitHub にリポジトリを push（https://github.com/BitRat009/hypnoctone-engine-ios, private）
+- [x] GitHub にリポジトリを push（https://github.com/BitRat009/hypnoctone-engine-ios）
+- [x] リポジトリを public に変更（macOS ランナーの CI が無料・無制限に）
+- [x] `.gitignore` に署名・秘密情報の除外を追加（証明書/鍵/プロビジョニング/環境変数）
 - [x] **CI でビルド検証成功** — 手書き pbxproj が Xcode 16 で実ビルド可能と実証（run #1, 41s）
-- [ ] 対話的確認が必要なとき: 時間課金のクラウド Mac（MacinCloud / Scaleway 等）か
-      Codemagic 無料枠でシミュレータ実行・UI/音の確認
+- [x] Codemagic 用 `codemagic.yaml` 作成（ビルド → シミュレータ起動 → 録画+SS → アーティファクト）
+- [x] Codemagic から自動再生させるため、`MainView` に `CI_AUTOSTART` 環境変数フックを追加
+- [x] Codex に codemagic.yaml と CI_AUTOSTART 変更をレビュー依頼 → 指摘（録画音声検証 / trap 失敗時 flush / シミュレータ選択決定性 / `--console-pty`）を反映
+- [ ] **ユーザー側作業**: Codemagic（codemagic.io）にサインアップ → GitHub リポジトリ `BitRat009/hypnoctone-engine-ios` を接続 → 初回 build をトリガー（push or 手動）
+- [ ] 初回 build 結果を確認: `preview.mp4`（音声含むか）/ `01-launch.png` `02-playing.png` `03-still-playing.png` / `app-stdout.log` をアーティファクトからダウンロードして UI と 440Hz サイン波を確認
+- [ ] 音声が mp4 に乗らなかった場合の代替案検討（例: アプリ側で短い WAV を生成・保存し artifacts に上げる）
 - [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信
