@@ -216,7 +216,7 @@ workflows:
           echo "--- syslog head ---"
           head -200 "$ARTIFACTS_DIR/syslog.log" || true
 
-      - name: Verify WAV (offline-rendered Sleep mix: 220Hz Drone + pink noise)
+      - name: "Verify WAV (offline-rendered Sleep mix: 220Hz Drone + pink noise)"
         script: |
           set -euo pipefail
           # v3 の本命: AudioEngineController が manualRenderingMode で書き出した WAV を検査。
