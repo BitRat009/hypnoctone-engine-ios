@@ -103,4 +103,7 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - `scheduleFadeIn/Out(duration: TimeInterval)` に変更（Generator が sampleRate を持つので Controller 側の frame 換算が不要）
       - stale comment 2 箇所修正
 - [ ] Phase 5: push → CI → artifacts_005 で 220Hz WAV 確認、波形が低音化していること & fade 形状維持を実証
-- [ ] **High 後続課題 (Codex 指摘 1)**: ToneRenderState の `fadeFramesRemaining` は main 書き / audio 書き戻しの両方が起きており data race。fade 中に main の scheduleFade* が呼ばれると audio thread の書き戻しで上書きされる可能性。pending（main 書き専用）/ active（audio 書き専用）に分離するか Swift Atomics 導入を検討。Task 7 着手前に対応推奨
+- [x] **High 後続課題 (Codex Task 6 指摘 1)**: ToneRenderState を pending（main writer / audio reader）/ active（audio 単一所有）に分離。active 書き戻し競合（fadeFramesRemaining の上書き）を完全に解消
+      - generation counter + double-check で best-effort な publication プロトコルを実装
+      - Codex 再レビュー: active 書き戻し競合は解消されたが、pending 領域は依然として Swift memory model 上 data race。store-store reordering で stale payload を accept する理論的穴が残る（実用上は許容）
+- [ ] **厳密 atomicity 後続課題**: pending 領域の torn read を完全に排除するため Swift Atomics パッケージ導入を検討。`pendingGeneration` を `ManagedAtomic<UInt32>` で release/acquire、`pendingTargetAmplitude` は `bitPattern` 経由で UInt32 atomic に。iOS 18+ なら標準の `Synchronization.Atomic`。Task 7+ で取り組み
