@@ -463,3 +463,21 @@ Step 3 で SUB、Step 4 で GRAIN、Step 5 で 4 モードに進む計画。
       - Goertzel で octave voice の切替 (A4 440 → 別候補 B4 494 / C#5 554 / E5 659 のいずれか) 観測
       - 振幅エンベロープが安定 (RMS 干渉なし)
       - 「怖い音」が「ATMÓS 的な静かな ambient」に改善
+
+[Task 16 Phase 5 再調整: artifacts_018 で「テルミン感」になった対策]
+
+      - 原因: octave voice (A4=440, C#5=554Hz) の高音域 + glide 3s で「テルミン奏法」感
+      - ATMÓS との比較: ATMÓS は E2(82)/F#2(92)/A2(110) の重低音重心、Hypnoctone は中高域中心
+      - 対策（ユーザー判断）: **全 voice を 1 オクターブ下げる**
+        - rootNote default: A3 (220) → A2 (110)
+        - droneNotes [root,+7,+12]: A3/E4/A4 → A2/E3/A3 (110/165/220Hz)
+        - pitchCandidates 全て 1 オクターブ下げ:
+          - root: [A2, B2, C#3, E3] (110-165Hz)
+          - 5th: [E3, F#3, A3, B3] (165-247Hz)
+          - octave: [A3, B3, C#4, E4] (220-330Hz)
+        - 倍音 ×2/×3 で 220-660Hz 帯が覆われるので音色感は維持
+      - クラスドキュメントの周波数表記を 110/165/220 ベースに更新
+- [ ] Phase 5 再々 push → CI 検証 (artifacts_019)
+      - 期待: 「テルミン感」消失、ATMÓS 的な重低音 drone に
+      - WAV stereo 16s / L/R 検査クリア / crash 無し
+      - UI 音名 A2·E3·A3 表示、generative で octave (13s 後) が候補内で動く

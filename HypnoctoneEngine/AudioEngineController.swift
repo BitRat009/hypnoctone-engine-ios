@@ -11,8 +11,9 @@ import os
 /// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
 /// `mainMixerNode` で並列ミックスする。全 generator に同じ envelope LFO（37 秒周期 / ±7.5%）を
 /// 適用して「全体が一緒に呼吸」する呼吸感を作る。
-/// 周波数は `Note` (MIDI 番号ベース) で扱い、UI に音名 (A3 / E4 / A4 等) を表示できる
-/// 基盤を持つ (Task 15)。
+/// 周波数は `Note` (MIDI 番号ベース) で扱い、UI に音名 (A2 / E3 / A3 等) を表示できる
+/// 基盤を持つ (Task 15)。デフォルト音域は重低音重心 A2 / E3 / A3 (110 / 165 / 220 Hz)、
+/// 倍音 ×2/×3 で 220-660Hz 帯をカバー (Task 16 で A3 始点から下げた、ATMÓS 重低音 drone に倣う)。
 /// 出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
@@ -36,7 +37,7 @@ import os
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
 /// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sleep-mix.wav に書き出す。
-/// WAV には Drone 3 声（A3 220 / E4 329.63 / A4 440 Hz、平均律、L/R 微小 detune）+ Noise（ピンクノイズ、L/R 独立）が
+/// WAV には Drone 3 声（A2 110 / E3 164.81 / A3 220 Hz 起点、平均律、L/R 微小 detune、generative pitch）+ Noise（ピンクノイズ、L/R 独立）が
 /// mixer でミックスされた 2ch stereo として記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
@@ -146,13 +147,16 @@ final class AudioEngineController: ObservableObject {
 
     // MARK: - 初期化
 
-    /// - Parameter rootNote: Drone 多声構成の基音 (root)。既定は A3 (= 220Hz)。
-    ///   Drone 3 声は [root, root+7semi (5度), root+12semi (octave)] で展開される。
+    /// - Parameter rootNote: Drone 多声構成の基音 (root)。既定は **A2 (= 110Hz)** 重低音域。
+    ///   Drone 3 声は [root, root+7semi (5度), root+12semi (octave)] で展開される
+    ///   → デフォルトでは A2 / E3 / A3 (110 / 165 / 220 Hz)。
+    ///   Task 16 で「テルミン感」対策として A3 → A2 に 1 オクターブ下げた (ATMÓS の重低音重心
+    ///   に倣う)。倍音 ×2/×3 で 220-660Hz 帯がカバーされるので音色感は維持される。
     /// - Parameter scale: 音階 (将来の generative pitch selection で参照)。
     ///   既定は A Major Pentatonic (ATMÓS と同じ Sleep 向け定番)。
     /// - Parameter mode: 動作モード。`nil` のとき環境変数 `CI_AUTOSTART` の有無で自動判定。
     init(
-        rootNote: Note = Note(name: "A3") ?? Note(midiNumber: 57),
+        rootNote: Note = Note(name: "A2") ?? Note(midiNumber: 45),
         scale: Scale = .majorPentatonic,
         mode: Mode? = nil
     ) {
@@ -166,19 +170,20 @@ final class AudioEngineController: ObservableObject {
         // Pitch 候補リスト: 各 voice の音域を保ったまま Scale 内 (A Major Pentatonic) からランダム選択する。
         // ATMÓS 観察と同じ「voice ごとの音域固定 + 候補内で動的選択」設計。
         // A Major Pentatonic = A, B, C#, E, F# の 5 音から各 voice の音域内 4 つを抜粋。
+        // Task 16 で全候補を 1 オクターブ下げた (テルミン感対策、ATMÓS 重低音重心に合わせる)。
         //
-        // **Step 2 制約**: `rootNote` (default A3) と `scale` (default majorPentatonic) を
-        // 公開 init で受けているが、現状この候補リストは A3 + majorPentatonic 固定で
+        // **Step 2 制約**: `rootNote` (default A2) と `scale` (default majorPentatonic) を
+        // 公開 init で受けているが、現状この候補リストは A2 + majorPentatonic 固定で
         // ベタ書きしている。別 root/scale を渡すと初期 droneNotes と候補リストのキーが
         // ずれるので注意。将来 Step 2.5+ で `Scale.notes(root:octaves:)` と音域フィルタで
         // 動的構築に切り替える予定 (Codex Task 16 Medium 指摘)。
         self.pitchCandidates = [
-            // root voice (中音域: A3 周辺)
+            // root voice (重低音域: A2 周辺、110-165Hz)
+            ["A2", "B2", "C#3", "E3"].compactMap(Note.init(name:)),
+            // 5th voice (低音域: E3 周辺、165-247Hz)
+            ["E3", "F#3", "A3", "B3"].compactMap(Note.init(name:)),
+            // octave voice (中音域: A3 周辺、220-330Hz)
             ["A3", "B3", "C#4", "E4"].compactMap(Note.init(name:)),
-            // 5th voice (中高音域: E4 周辺)
-            ["E4", "F#4", "A4", "B4"].compactMap(Note.init(name:)),
-            // octave voice (高音域: A4 周辺)
-            ["A4", "B4", "C#5", "E5"].compactMap(Note.init(name:)),
         ]
         let resolvedMode: Mode
         if let mode = mode {
@@ -236,7 +241,7 @@ final class AudioEngineController: ObservableObject {
         let envelopeInitialPhase: Double = 0.0
 
         // initialDroneNotes[0]=root, [1]=5度, [2]=octave。各 frequency は Note が
-        // 平均律 (12 TET) で計算 (A3=220Hz, E4=329.63Hz, A4=440Hz)。
+        // 平均律 (12 TET) で計算 (A2=110Hz, E3=164.81Hz, A3=220Hz、Task 16 で 1 オクターブ下げ)。
         self.droneGenerators = [
             DroneGenerator(
                 format: format, frequency: initialDroneNotes[0].frequency,
