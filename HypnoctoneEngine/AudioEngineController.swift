@@ -4,9 +4,9 @@ import os
 /// UI から音響処理を分離するためのコントローラ。
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
-/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator`（持続音）と
-/// `NoiseGenerator`（ピンクノイズ）に委譲し、`mainMixerNode` で並列ミックスする。
-/// 音声ファイル・録音素材・ループ素材は一切使わない。
+/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
+/// （基音 + 完全 5度 + オクターブ、純正律比）と `NoiseGenerator`（ピンクノイズ）に委譲し、
+/// `mainMixerNode` で並列ミックスする。音声ファイル・録音素材・ループ素材は一切使わない。
 ///
 /// ## 想定する呼び出しスレッド
 /// クラス全体を `@MainActor` で隔離し、`start()` / `stop()` / `setVolume(_:)` を含む
@@ -14,9 +14,9 @@ import os
 /// オーディオスレッドで動くが、render block 内では各 generator の内部 state を
 /// 直接読み書きするだけで本クラスのメソッドは呼ばない。
 ///
-/// ## フェード（Task 5 / Task 8）
+/// ## フェード（Task 5 / Task 8 / Task 9）
 /// `start()` で 0.8 秒の fade-in、`stop()` で 0.8 秒の fade-out を行う。
-/// fade は `DroneGenerator` と `NoiseGenerator` の両方に同期的に仕掛ける
+/// fade は多声 `DroneGenerator` 全てと `NoiseGenerator` に同期的に仕掛ける
 /// （UX 上 Sleep モード全体の fade として揃える）。
 /// 補間ロジックは各 generator の render block 内。`stop()` は fade-out 完了まで
 /// 待ってから engine を止めるため `Task { @MainActor in ... }` を内部で起動し、
@@ -28,7 +28,7 @@ import os
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
 /// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sleep-mix.wav に書き出す。
-/// WAV には Drone（220Hz サイン波）+ Noise（ピンクノイズ）が mixer でミックスされた状態が記録される。
+/// WAV には Drone 3 声（220 / 330 / 440 Hz）+ Noise（ピンクノイズ）が mixer でミックスされた状態が記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
@@ -57,8 +57,11 @@ final class AudioEngineController {
 
     private let engine = AVAudioEngine()
 
-    /// Sleep モード基底音を担う Drone（持続音）生成器。
-    private let droneGenerator: DroneGenerator
+    /// Sleep モード基底音を担う Drone（持続音）生成器の配列。
+    /// 多声構成（基音 + 完全 5度 + オクターブ）で和音的な厚みを出す。
+    /// 完全 5度・オクターブは純正律比（3/2, 2/1）で取り、平均律の微細なうなりを避けて
+    /// Sleep 向けに「鳴り続けても疲れない」協和を確保する。
+    private let droneGenerators: [DroneGenerator]
 
     /// Sleep モードで Drone に重ねるピンクノイズ生成器。
     /// `mainMixerNode` で Drone と並列にミックスされる。
@@ -103,9 +106,10 @@ final class AudioEngineController {
 
     // MARK: - 初期化
 
-    /// - Parameter frequency: 生成するサイン波の周波数（Hz）。既定は 220Hz（Drone デフォルト）。
+    /// - Parameter rootFrequency: Drone 多声構成の基音（Hz）。既定は 220Hz（A3）。
+    ///   5度（× 3/2）とオクターブ（× 2/1）が派生される。
     /// - Parameter mode: 動作モード。`nil` のとき環境変数 `CI_AUTOSTART` の有無で自動判定。
-    init(frequency: Double = 220.0, mode: Mode? = nil) {
+    init(rootFrequency: Double = 220.0, mode: Mode? = nil) {
         let resolvedMode: Mode
         if let mode = mode {
             resolvedMode = mode
@@ -126,7 +130,23 @@ final class AudioEngineController {
         }
 
         // Generator を先に作る（engine の rendering mode とは独立に source node を構築できる）。
-        self.droneGenerator = DroneGenerator(format: format, frequency: frequency)
+        // 多声 Drone: 基音 / 完全 5度 / オクターブ。振幅は基音強め、上倍音を弱めて
+        // 自然な厚みを作る。
+        //
+        // Headroom 評価:
+        //   - Drone 3 声は純サイン波で peak 厳密上限 = 0.15 + 0.08 + 0.05 = 0.28
+        //   - Noise は Paul Kellet's filter 出力で defaultAmplitude=0.05 を係数とした
+        //     統計的振幅（厳密に [-0.05, 0.05] に収まる保証は無いが実測でほぼこのオーダー）
+        //   - 合算で実効ピークは 0.3 前後
+        //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.15 前後
+        // 16bit s16le 換算でも余裕があり、CI の WAV 検査でクリッピング無しを確認できる。
+        let fifthFrequency = rootFrequency * 1.5
+        let octaveFrequency = rootFrequency * 2.0
+        self.droneGenerators = [
+            DroneGenerator(format: format, frequency: rootFrequency,   defaultAmplitude: 0.15),
+            DroneGenerator(format: format, frequency: fifthFrequency,  defaultAmplitude: 0.08),
+            DroneGenerator(format: format, frequency: octaveFrequency, defaultAmplitude: 0.05),
+        ]
         self.noiseGenerator = NoiseGenerator(format: format)
 
         // offline モードでは attach / connect の前に manual rendering を有効化する必要がある。
@@ -199,8 +219,9 @@ final class AudioEngineController {
                 return
             }
             // さらに二重チェック: 再 start で target が audible に戻っていれば finalize しない。
-            // Drone / Noise どちらかが audible なら fade-out 中ではない（再 start 後）。
-            if self.droneGenerator.hasAudibleTarget || self.noiseGenerator.hasAudibleTarget {
+            // 多声 Drone のいずれか、または Noise が audible なら fade-out 中ではない（再 start 後）。
+            let anyDroneAudible = self.droneGenerators.contains(where: { $0.hasAudibleTarget })
+            if anyDroneAudible || self.noiseGenerator.hasAudibleTarget {
                 self.logger.info("fade-out 中に再 start を検知 (hasAudibleTarget)。engine.stop() をスキップ。")
                 return
             }
@@ -265,16 +286,20 @@ final class AudioEngineController {
 
     // MARK: - フェードスケジュール
 
-    /// fade-in を `droneGenerator` と `noiseGenerator` の両方に依頼する。
-    /// 両 generator は独立した state を持つが、UX 上は「Sleep モード全体の fade-in」として揃える。
+    /// fade-in を全 Drone 声と Noise に依頼する。
+    /// 各 generator は独立した state を持つが、UX 上は「Sleep モード全体の fade-in」として揃える。
     private func scheduleFadeIn() {
-        droneGenerator.scheduleFadeIn(duration: fadeInSeconds)
+        for drone in droneGenerators {
+            drone.scheduleFadeIn(duration: fadeInSeconds)
+        }
         noiseGenerator.scheduleFadeIn(duration: fadeInSeconds)
     }
 
-    /// fade-out を `droneGenerator` と `noiseGenerator` の両方に依頼する。
+    /// fade-out を全 Drone 声と Noise に依頼する。
     private func scheduleFadeOut() {
-        droneGenerator.scheduleFadeOut(duration: fadeOutSeconds)
+        for drone in droneGenerators {
+            drone.scheduleFadeOut(duration: fadeOutSeconds)
+        }
         noiseGenerator.scheduleFadeOut(duration: fadeOutSeconds)
     }
 
@@ -420,20 +445,21 @@ final class AudioEngineController {
     // MARK: - セットアップ
 
     /// オーディオグラフを構築する。初期化時に一度だけ呼ぶ。
-    /// `droneGenerator.sourceNode` と `noiseGenerator.sourceNode` を attach し、
+    /// 多声 Drone（基音/5度/オクターブ）と Noise の sourceNode をすべて attach し、
     /// `mainMixerNode` に並列接続する（複数 source → mixer の和音構成）。
     private func buildAudioGraph() {
-        let droneNode = droneGenerator.sourceNode
-        let noiseNode = noiseGenerator.sourceNode
-        let format = droneGenerator.sourceFormat
+        // 全 generator が共有する format（`droneGenerators` の各要素も同じ format で構築済み）。
+        let format = noiseGenerator.sourceFormat
 
-        engine.attach(droneNode)
-        engine.attach(noiseNode)
-        // `mainMixerNode` へアクセスすると outputNode への接続が自動生成される。
-        // manual rendering mode が有効ならハードウェアではなく manual output に向く。
-        // 複数 source を同じ mixer に connect するとフレームワーク側でミックスされる。
-        engine.connect(droneNode, to: engine.mainMixerNode, format: format)
-        engine.connect(noiseNode, to: engine.mainMixerNode, format: format)
+        for drone in droneGenerators {
+            engine.attach(drone.sourceNode)
+            // `mainMixerNode` へアクセスすると outputNode への接続が自動生成される。
+            // manual rendering mode が有効ならハードウェアではなく manual output に向く。
+            // 複数 source を同じ mixer に connect するとフレームワーク側でミックスされる。
+            engine.connect(drone.sourceNode, to: engine.mainMixerNode, format: format)
+        }
+        engine.attach(noiseGenerator.sourceNode)
+        engine.connect(noiseGenerator.sourceNode, to: engine.mainMixerNode, format: format)
         engine.mainMixerNode.outputVolume = defaultVolume
         engine.prepare()
     }

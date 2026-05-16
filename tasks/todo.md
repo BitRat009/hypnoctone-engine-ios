@@ -163,8 +163,32 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - 1 回往復で Critical/High/Medium 全てなしの最終 OK
       - 軽微指摘の WAV 名違和感 → リネームで対応
       - Paul Kellet's 係数妥当性 / xorshift32 audio thread 安全性 / 並列 mixer 接続 / クリッピング余裕を全部確認
-- [ ] Phase 5: push → Codemagic 実走 → artifacts_009 で Drone + Noise mix を確認
-      - 期待: WAV 仕様（44.1kHz mono >= 3.5s）維持
-      - 振幅エンベロープが fade 形状を保ちつつ Drone 単独時より大きい（ノイズ重畳の証拠）
-      - crash 無し
-      - codemagic.yaml の WAV パス更新でも CI フローが回ること
+- [x] Phase 5: push → Codemagic 実走 → artifacts_009 で Drone + Noise mix を確認
+      - 初回 push は YAML エラー（"Sleep mix: 220Hz" の `:` が key/value 誤解釈）で失敗
+        → fix コミット a09559f で step name をダブルクオート quote して解消
+      - sleep-mix.wav: pcm_s16le / 44100Hz / 1ch / 4.09s（仕様クリア）
+      - crash 無し（pid 1809 が t+5/8/11s で生存）
+      - 0.1s 窓解析: 定常区間 max が 2508〜2750 で揺らぐ（Task 7 の Drone 単独 max=2317 一定 と対比）
+        = ピンクノイズの重畳を実測で確認
+      - RMS は Drone 支配で ~1640、Noise 0.05 amp の影響は peak には出るが RMS には出ない（理論一致）
+      - fade-in/fade-out の線形性が両 generator で同期維持
+      - クリッピング余裕も十分（max 2750 / 32767 = 0.084）
+
+## Task 9 — 音質アップ第 1 弾: Drone を多声化（純正律和音）
+
+- [x] Phase 1: AudioEngineController を多声 Drone に拡張
+      - `droneGenerator: DroneGenerator` (単数) → `droneGenerators: [DroneGenerator]` (配列)
+      - 3 声構成: 基音 (220Hz amp=0.15) / 完全 5度 (× 3/2 = 330Hz amp=0.08) / オクターブ (× 2.0 = 440Hz amp=0.05)
+      - 純正律比（3/2, 2/1）で平均律の微細うなり（5度で 0.4Hz 差）を回避、Sleep 用途の協和優先
+      - init パラメータ名 `frequency` → `rootFrequency`（意味の明確化）
+      - buildAudioGraph で全 Drone + Noise を mainMixerNode に並列 attach/connect
+      - scheduleFade*: for-in で全 Drone + Noise に同 duration スケジュール
+      - hasAudibleTarget チェック: `droneGenerators.contains(where:)` || noiseGenerator
+      - Headroom: Drone 合計 0.28 + Noise 0.05 統計 ≒ 0.3 ピーク → mainMixer 0.5 で実効 0.15
+- [x] Phase 2: Codex レビュー
+      - 初回: Medium 1 件（振幅コメントの厳密性 — Noise は厳密上限保証されないので断言を弱める）
+      - 反映後: Critical/High/Medium 全て無しで最終 OK
+- [ ] Phase 3: push → Codemagic → artifacts_010 で和音化を確認
+      - 期待: WAV 仕様維持、定常区間で 220/330/440Hz のピークが FFT で見える
+      - 振幅エンベロープの fade 形状維持
+      - クリッピング無し（max が 16bit 上限 32767 から余裕あり）
