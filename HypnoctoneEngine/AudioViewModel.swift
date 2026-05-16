@@ -31,10 +31,16 @@ final class AudioViewModel: ObservableObject {
 
     private let controller: AudioEngineController
 
-    /// - Parameter controller: 音響処理コントローラ。テスト時に差し替えられるよう注入可能にする。
-    init(controller: AudioEngineController = AudioEngineController()) {
-        self.controller = controller
-        controller.setVolume(Float(volume))
+    /// - Parameter controller: 音響処理コントローラ。テスト時に差し替えられるよう注入可能。
+    ///
+    /// `AudioEngineController` は `@MainActor` 隔離されているため、デフォルト引数式
+    /// （呼び出し側の nonisolated context で評価される）から `AudioEngineController()` を
+    /// 直接呼ぶとコンパイルエラーになる。引数を Optional にしておき、init 本体
+    /// （MainActor 隔離下）で生成することでこの制約を回避する。
+    init(controller: AudioEngineController? = nil) {
+        let resolved = controller ?? AudioEngineController()
+        self.controller = resolved
+        resolved.setVolume(Float(volume))
     }
 
     /// 再生 / 停止をトグルする。
