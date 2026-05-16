@@ -133,8 +133,10 @@ final class AudioEngineController: ObservableObject {
     private let offlineMaxFrames: AVAudioFrameCount = 4_096
 
     /// offline モードで render する総秒数（fade-in + 定常 + fade-out）。
-    /// fade-in 0.8s + 定常 2.4s + fade-out 0.8s = 4.0s。
-    private let offlineRenderSeconds: Double = 4.0
+    /// Task 16 で 4.0s → 16.0s に延長: generative pitch (interval 13-23s) を本番 interval で
+    /// CI 検証するため。fade-in 0.8s + 定常 14.4s + fade-out 0.8s = 16.0s。
+    /// CI WAV サイズ 4 倍 (~3MB)、ビルド時間 +12s 程度のトレードオフ。
+    private let offlineRenderSeconds: Double = 16.0
 
     /// fade-in の所要秒数。
     private let fadeInSeconds: Double = 0.8
@@ -187,8 +189,9 @@ final class AudioEngineController: ObservableObject {
                 : .realtime
         }
         self.mode = resolvedMode
-        // CI モードでは glide も短く（0.5s）、realtime は 3s の落ち着いた補間。
-        self.pitchGlideSeconds = resolvedMode == .offlineToWAV ? 0.5 : 3.0
+        // Task 16 で CI WAV を 16s に延長したため、glide も realtime と同じ 3s で統一。
+        // 短い glide (0.5s) は警報・サイレン的な聴感になることが artifacts_017 で実測されたため。
+        self.pitchGlideSeconds = 3.0
 
         // 2ch (stereo) / 44.1kHz / Float32 標準フォーマット。
         // Task 10 で stereo 化: 各 Drone は L/R で detune したサイン波、Noise は L/R 独立 PRNG。
@@ -563,12 +566,14 @@ final class AudioEngineController: ObservableObject {
         let maxZeroFrameRetries = 8
 
         // ---- inline PitchScheduler (offline 専用、Task 16) ----
-        // CI モードでは pitchIntervals は本来 19/23/13s だが、4 秒 WAV では発火しない。
-        // ×0.1 = 1.9/2.3/1.3s で 4 秒 WAV 内に 2-3 回発火させて generative 効果を CI で実証。
+        // WAV を 16s 化したので pitchIntervals (19/23/13s) を本番値そのままで使う。
+        // - 16 秒 WAV 内で octave voice (13s) は 1 回、root (19s) と 5th (23s) は 0-1 回切替
+        // - 「ATMÓS 的にゆっくり変化」が CI でも観測できる
+        // - fade-in 0.8s 中の切替を避けるため、最初の発火を interval から開始 (= interval だけ遅延)
+        //   (改善案: 必要なら開始 offset を fade-in 完了後にずらす)
         // realtime Task scheduler は startOfflineRender 内では使えない (同期ループで sleep 不可)。
-        let offlinePitchScale = 0.1
         let pitchUpdateFrameIntervals: [AVAudioFrameCount] = pitchIntervals.map {
-            AVAudioFrameCount(renderSampleRate * $0 * offlinePitchScale)
+            AVAudioFrameCount(renderSampleRate * $0)
         }
         var nextPitchUpdateFrames: [AVAudioFrameCount] = pitchUpdateFrameIntervals
 

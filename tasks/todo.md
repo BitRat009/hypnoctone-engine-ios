@@ -443,3 +443,23 @@ Step 3 で SUB、Step 4 で GRAIN、Step 5 で 4 モードに進む計画。
         - 静的単一ピーク → 動的複数ピーク = generative の証拠
       - UI screenshot: 起動時 A3·E4·A4 / 後の screenshot で異なる音名
       - クリッピング無し、glide で位相連続維持
+
+[Task 16 Phase 5 調整: artifacts_017 で「怖い音」になった対策]
+
+      - 原因分析: CI interval ×0.1 (1.9/2.3/1.3s) + glide 0.5s → 4 秒 WAV 内で 4-5 回切替
+        - fade-in 0.8s 中に既に切替発生、複数 voice が同時に違う方向に動いて干渉
+        - 振幅エンベロープも RMS 1485→890→1632 と不安定 (位相打ち消し)
+        - 警報・サイレン的な聴感に
+      - 対策（ユーザー判断）: WAV 尺 4s → 16s に延長し、本番 interval (19/23/13s) を CI でも使う
+        - AudioEngineController: offlineRenderSeconds 4.0 → 16.0
+        - pitchGlideSeconds: CI 0.5s 廃止 → realtime と同じ 3.0s に統一
+        - inline scheduler: ×0.1 scale 廃止 → 本番 interval そのまま
+        - codemagic.yaml: duration 検査 >= 3.5s → >= 15.0s
+      - 期待: 16 秒 WAV 内で octave voice (13s) のみ 1 回切替、root/5th は変化なし
+        → ATMÓS 的なゆっくりした変化、fade-in 中は切替なし
+      - CI ビルド時間 +12s / WAV サイズ ~3MB に
+- [ ] Phase 5 再 push → CI 検証 (artifacts_018)
+      - 期待: WAV stereo / 16.09s / L/R 検査クリア
+      - Goertzel で octave voice の切替 (A4 440 → 別候補 B4 494 / C#5 554 / E5 659 のいずれか) 観測
+      - 振幅エンベロープが安定 (RMS 干渉なし)
+      - 「怖い音」が「ATMÓS 的な静かな ambient」に改善

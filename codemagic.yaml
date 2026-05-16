@@ -246,12 +246,13 @@ workflows:
             echo "ERROR: チャネル数が想定 (2 = stereo) と違う: $CHANNELS"
             FAIL=1
           fi
-          # Task 5 で fade-in 0.8s + 定常 2.4s + fade-out 0.8s = 4.0 秒分 render する想定。
-          # 誤差を見越して 3.5 秒以上を要求。
+          # Task 16 で WAV を 16s に延長（generative pitch を本番 interval で CI 検証するため）。
+          # fade-in 0.8s + 定常 14.4s + fade-out 0.8s = 16.0 秒分 render する想定。
+          # 誤差を見越して 15.0 秒以上を要求。
           # awk で float 比較（bash の test では浮動小数比較ができない）。
-          DURATION_OK=$(awk -v d="$DURATION" 'BEGIN { print (d+0 >= 3.5) ? 1 : 0 }')
+          DURATION_OK=$(awk -v d="$DURATION" 'BEGIN { print (d+0 >= 15.0) ? 1 : 0 }')
           if [ "$DURATION_OK" != "1" ]; then
-            echo "ERROR: duration が短すぎる (期待 >= 3.5s, 実際 $DURATION s)"
+            echo "ERROR: duration が短すぎる (期待 >= 15.0s, 実際 $DURATION s)"
             FAIL=1
           fi
           # ---- L/R それぞれが無音でない、かつ L != R であることを確認 ----
@@ -287,7 +288,7 @@ workflows:
           if [ "$FAIL" = "1" ]; then
             exit 1
           fi
-          echo "OK: sleep-mix.wav は 44.1kHz / stereo (2ch) / >= 3.5s / L≠R の妥当な WAV です。"
+          echo "OK: sleep-mix.wav は 44.1kHz / stereo (2ch) / >= 15.0s / L≠R の妥当な WAV です。"
 
       - name: Shutdown simulator
         script: |
