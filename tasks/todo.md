@@ -481,3 +481,20 @@ Step 3 で SUB、Step 4 で GRAIN、Step 5 で 4 モードに進む計画。
       - 期待: 「テルミン感」消失、ATMÓS 的な重低音 drone に
       - WAV stereo 16s / L/R 検査クリア / crash 無し
       - UI 音名 A2·E3·A3 表示、generative で octave (13s 後) が候補内で動く
+
+[Task 16 終了判断: generative を OFF にして Task 14 状態に戻す]
+
+      - artifacts_018/019 の聴感: 1 オクターブ下げてもテルミン感 (高音 + glide) が違和感
+      - ユーザー判断: 「初期のころ (Task 14 まで) の静かな方が良い、高音要らない」
+      - 対応:
+        - `generativePitchEnabled = false` flag を導入し、startPitchScheduler() と
+          offline inline scheduler を guard で skip
+        - 音域を Task 16 の A2 ベース → Task 15 の A3 ベース (A3/E4/A4) に戻す
+        - pitchCandidates も A3 ベースに復元 (将来再有効化用に保持)
+        - Task 16 のコード基盤 (setFrequency, glide, atomic seqlock, Scheduler) は
+          全部残置。flag を反転するだけで復活可能
+      - 残置の理由: ATMÓS 化方向は将来再検討の可能性。実機聴取で「やはり動きが欲しい」と
+        なったら flag = true で即復活、調整 (interval / glide / 音域 / 候補) のみ続行
+      - 結果: Task 14 (倍音 + envelope) + Task 15 (Note UI 表示) 状態に。
+        WAV 尺 16s は維持 (envelope 1/3 周期分の動きが観察可能)
+- [ ] 再 push → 検証 (artifacts_020): 静的 Task 14 + UI 表示の状態に戻る確認
