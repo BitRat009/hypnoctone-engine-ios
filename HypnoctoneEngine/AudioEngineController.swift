@@ -5,11 +5,13 @@ import os
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
 /// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
-/// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune、各声に独立 LFO で pitch vibrato、
+/// （rootNote + 5度 + オクターブ、平均律 12 TET、L/R 微小 detune、各声に独立 LFO で pitch vibrato、
 ///  各声に第 2 / 第 3 倍音で楽器的温かみ）と
 /// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
 /// `mainMixerNode` で並列ミックスする。全 generator に同じ envelope LFO（37 秒周期 / ±7.5%）を
 /// 適用して「全体が一緒に呼吸」する呼吸感を作る。
+/// 周波数は `Note` (MIDI 番号ベース) で扱い、UI に音名 (A3 / E4 / A4 等) を表示できる
+/// 基盤を持つ (Task 15)。
 /// 出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
@@ -33,7 +35,7 @@ import os
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
 /// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sleep-mix.wav に書き出す。
-/// WAV には Drone 3 声（220 / 330 / 440 Hz、L/R 微小 detune）+ Noise（ピンクノイズ、L/R 独立）が
+/// WAV には Drone 3 声（A3 220 / E4 329.63 / A4 440 Hz、平均律、L/R 微小 detune）+ Noise（ピンクノイズ、L/R 独立）が
 /// mixer でミックスされた 2ch stereo として記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
@@ -59,14 +61,26 @@ final class AudioEngineController {
     /// 現在の動作モード。
     let mode: Mode
 
+    /// 現在の root note。Drone 3 声はこの note を基準に [+0, +7, +12] semitone で展開される。
+    let rootNote: Note
+
+    /// 現在のスケール (将来の generative pitch selection で参照)。
+    let scale: Scale
+
+    /// 現在鳴っている Drone 3 声の note 群（UI 表示用）。
+    /// [root, root+7 (5th), root+12 (octave)] の順。
+    let droneNotes: [Note]
+
     // MARK: - 内部プロパティ
 
     private let engine = AVAudioEngine()
 
     /// Sleep モード基底音を担う Drone（持続音）生成器の配列。
-    /// 多声構成（基音 + 完全 5度 + オクターブ）で和音的な厚みを出す。
-    /// 完全 5度・オクターブは純正律比（3/2, 2/1）で取り、平均律の微細なうなりを避けて
-    /// Sleep 向けに「鳴り続けても疲れない」協和を確保する。
+    /// 多声構成（root / root+7semitone / root+12semitone = 基音 + 完全 5度 + オクターブ）で
+    /// 和音的な厚みを出す。Task 15 で平均律 (12 TET) に統一（後の generative pitch selection
+    /// で「スケール内任意の音切替」と整合させるため）。純正律時の 1.5 ratio から
+    /// 平均律 2^(7/12) ≈ 1.4983 に変わり 5度で 0.4Hz 程度の差が出るが、Sleep の LFO/envelope
+    /// 揺らぎに紛れて聴感差は小さい想定。
     private let droneGenerators: [DroneGenerator]
 
     /// Sleep モードで Drone に重ねるピンクノイズ生成器。
@@ -112,10 +126,21 @@ final class AudioEngineController {
 
     // MARK: - 初期化
 
-    /// - Parameter rootFrequency: Drone 多声構成の基音（Hz）。既定は 220Hz（A3）。
-    ///   5度（× 3/2）とオクターブ（× 2/1）が派生される。
+    /// - Parameter rootNote: Drone 多声構成の基音 (root)。既定は A3 (= 220Hz)。
+    ///   Drone 3 声は [root, root+7semi (5度), root+12semi (octave)] で展開される。
+    /// - Parameter scale: 音階 (将来の generative pitch selection で参照)。
+    ///   既定は A Major Pentatonic (ATMÓS と同じ Sleep 向け定番)。
     /// - Parameter mode: 動作モード。`nil` のとき環境変数 `CI_AUTOSTART` の有無で自動判定。
-    init(rootFrequency: Double = 220.0, mode: Mode? = nil) {
+    init(
+        rootNote: Note = Note(name: "A3") ?? Note(midiNumber: 57),
+        scale: Scale = .majorPentatonic,
+        mode: Mode? = nil
+    ) {
+        self.rootNote = rootNote
+        self.scale = scale
+        // 3 声構成: root / root+7semi (5度) / root+12semi (octave)
+        let droneIntervals = [0, 7, 12]
+        self.droneNotes = droneIntervals.map { Note(midiNumber: rootNote.midiNumber + $0) }
         let resolvedMode: Mode
         if let mode = mode {
             resolvedMode = mode
@@ -168,11 +193,11 @@ final class AudioEngineController {
         let envelopeDepth: Float = 0.075
         let envelopeInitialPhase: Double = 0.0
 
-        let fifthFrequency = rootFrequency * 1.5
-        let octaveFrequency = rootFrequency * 2.0
+        // droneNotes[0] = root, [1] = 5度, [2] = octave。それぞれの frequency は Note が
+        // 平均律 (12 TET) で計算する (A3=220Hz, E4=329.63Hz, A4=440Hz)。
         self.droneGenerators = [
             DroneGenerator(
-                format: format, frequency: rootFrequency,
+                format: format, frequency: self.droneNotes[0].frequency,
                 lfoPeriodSeconds: 17.3, lfoDepthCents: 2.5, lfoInitialPhase: 0.0,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -180,7 +205,7 @@ final class AudioEngineController {
                 defaultAmplitude: 0.15
             ),
             DroneGenerator(
-                format: format, frequency: fifthFrequency,
+                format: format, frequency: self.droneNotes[1].frequency,
                 lfoPeriodSeconds: 23.1, lfoDepthCents: 2.0, lfoInitialPhase: .pi / 2,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -188,7 +213,7 @@ final class AudioEngineController {
                 defaultAmplitude: 0.08
             ),
             DroneGenerator(
-                format: format, frequency: octaveFrequency,
+                format: format, frequency: self.droneNotes[2].frequency,
                 lfoPeriodSeconds: 13.7, lfoDepthCents: 1.5, lfoInitialPhase: .pi,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,

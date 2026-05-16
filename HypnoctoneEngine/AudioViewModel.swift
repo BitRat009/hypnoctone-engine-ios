@@ -29,6 +29,16 @@ final class AudioViewModel: ObservableObject {
         isPlaying ? "Playing" : "Stopped"
     }
 
+    /// 現在の root note 名（"A3" 等）。UI 表示用。
+    var rootNoteName: String { controller.rootNote.name }
+
+    /// 現在のスケール名（"MajPentatonic" 等）。UI 表示用。
+    var scaleName: String { controller.scale.shortName }
+
+    /// 現在鳴っている Drone 3 声の note 名（["A3", "E4", "A4"]）。UI 表示用。
+    /// Task 15 段階では固定。Step 2 で generative に切り替わると時間軸で変化する。
+    var droneNoteNames: [String] { controller.droneNotes.map(\.name) }
+
     private let controller: AudioEngineController
 
     /// - Parameter controller: 音響処理コントローラ。テスト時に差し替えられるよう注入可能。

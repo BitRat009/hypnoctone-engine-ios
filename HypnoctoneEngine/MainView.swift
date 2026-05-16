@@ -13,12 +13,13 @@ struct MainView: View {
             Theme.backgroundGradient
                 .ignoresSafeArea()
 
-            VStack(spacing: 36) {
+            VStack(spacing: 32) {
                 header
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
                 PulseView(isActive: viewModel.isPlaying)
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
                 statusText
+                musicInfo
                 transportButton
                 volumeControl
                 timerLabel
@@ -63,6 +64,22 @@ struct MainView: View {
         Text(viewModel.statusText)
             .font(.system(size: 15, weight: .regular, design: .rounded))
             .foregroundColor(Theme.secondaryText)
+    }
+
+    /// 音楽理論ベースの情報表示（Task 15 で追加、ATMÓS の "Scale: ... / 音名" を倣う）。
+    /// Scale 名 + Drone 3 声の音名を中央寄せで小さく表示する。
+    /// Step 2 以降で generative pitch selection が入ると音名は時間軸で変化する。
+    private var musicInfo: some View {
+        VStack(spacing: 4) {
+            Text("Scale \(viewModel.rootNoteName) \(viewModel.scaleName)")
+                .font(.system(size: 12, weight: .regular, design: .rounded))
+                .tracking(1)
+                .foregroundColor(Theme.secondaryText)
+            Text(viewModel.droneNoteNames.joined(separator: " · "))
+                .font(.system(size: 16, weight: .light, design: .rounded))
+                .tracking(3)
+                .foregroundColor(Theme.primaryText)
+        }
     }
 
     /// Start / Stop ボタン。

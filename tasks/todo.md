@@ -353,9 +353,48 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Phase 4: Codex レビュー
       - Critical/High なし、Medium 2 件 (同期保証精度 + 中途半端設定ガード) → 反映後最終 OK
       - 「将来 graph 変更時は共有 sample clock / mixer 後段 envelope に移行」コメント明記
-- [ ] Phase 5: push → Codemagic → artifacts_015 で envelope を実証
-      - 期待: WAV stereo 維持、L/R 検査クリア、crash 無し
-      - 基音/倍音の Goertzel mag は維持 (envelope は周波数を変えない)
-      - WAV 4 秒中で 37秒 envelope は 1/9 周期しか進まないが、初期位相 0 から sin の上昇区間 (0→π/2)
-        を 4秒で約 39° (4/37×360) 進むので、定常区間で peak が緩やかに +~3% 程度変化する想定
-      - クリッピング無し
+- [x] Phase 5: push → Codemagic → artifacts_015 で envelope を計測実証
+      - WAV stereo / 4.09s / L/R 検査クリア、crash 無し
+      - **0.1s 窓 peak で Task 13 vs Task 14 比較 → 理論値と実測値が誤差 0.5% 以内で完全一致**:
+        - 0.1s: 実測 1.0017 / 理論 1.0013 (sin(2π×0.1/37) × 0.075 + 1)
+        - 1.0s: 実測 1.0106 / 理論 1.0127
+        - 2.0s: 実測 1.0243 / 理論 1.0250
+        - 3.0s: 実測 1.0351 / 理論 1.0366
+        - 3.3s: 実測 1.0382 / 理論 1.0399
+      - envelope LFO `1.0 + 0.075 × sin(2π × t / 37)` が設計通り振幅を変調していると実証
+      - CI 4 秒 WAV では 1/10 周期しか進まず変化が subtle (最大 +3.8%) なので体感は弱い
+      - フル呼吸サイクル (37 秒) は実機聴取で確認するという方針（ユーザー判断）
+
+## Task 15 — ATMÓS 化 Step 1: Note / Scale 抽象化 + UI 音名表示
+
+ATMÓS スクショ分析を元に、Hypnoctone を generative composition の方向に進める第 1 弾。
+今回は基盤のみ（音名/スケール抽象化 + UI 表示）。後続 Step 2 で generative pitch selection、
+Step 3 で SUB、Step 4 で GRAIN、Step 5 で 4 モードに進む計画。
+
+- [x] Phase 1: MusicTheory.swift 新規作成
+      - struct Note { midiNumber } + computed frequency (12 TET, `440 × 2^((midi-69)/12)`) + name ("A3"等)
+      - init(midiNumber:): precondition で 0..<128 範囲チェック
+      - init?(name:): "A3"/"C#4"/"C-1" 等パース、範囲外 octave で nil
+      - enum Scale: majorPentatonic / minorPentatonic / major / naturalMinor / chromatic
+        - intervals (半音 offsets), shortName (UI 用), notes(root:octaves:) 展開
+- [x] Phase 2: DroneGenerator / AudioEngineController を Note ベースに移行
+      - AudioEngineController に rootNote / scale / droneNotes フィールド追加
+      - init を rootFrequency:Double → rootNote:Note + scale:Scale に変更
+        - default: A3 + majorPentatonic
+      - droneNotes = [root, root+7, root+12] = [A3, E4, A4]
+      - 純正律 (5度=1.5x) → 平均律 (2^(7/12)≈1.498x) で E4 が 330Hz → 329.63Hz に
+- [x] Phase 3: MainView UI に音名表示
+      - AudioViewModel に rootNoteName / scaleName / droneNoteNames を expose
+      - MainView の statusText 下に musicInfo セクション追加
+        - "Scale A3 MajPentatonic" (ATMÓS と類似フォーマット)
+        - "A3 · E4 · A4" (Drone 3 声の音名)
+- [x] Phase 4: Codex レビュー
+      - Critical/High なし、Medium 2 件
+        - Note の MIDI 範囲検証 → precondition + init? の guard で反映
+        - CI Goertzel target 更新 (CI には未導入、手動解析の方針で OK)
+      - メモ指摘の旧 330Hz コメント残骸も反映済み
+- [ ] Phase 5: push → CI 検証 (artifacts_016)
+      - 期待: WAV stereo/4.09s 維持、L/R 検査クリア、crash 無し
+      - 手動 Goertzel target 更新: 220 / 329.6276 / 440 Hz (E4 は平均律で 329.63)
+      - 純正律→平均律変更による「うねり」程度を観察（LFO/envelope で隠れる想定）
+      - MainView の音名表示 (Scale A3 MajPentatonic / A3 · E4 · A4) がスクリーンショットに出る
