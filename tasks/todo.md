@@ -62,7 +62,21 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - sleep を 3s/7s/12s/16s に拡大（iOS 18 cold start 待ち、4 枚撮影）
       - 実行開始時刻以降の crash log を DiagnosticReports + CoreSimulator から広めに収集
       - Codex レビュー反映: awk の PID 数値判定 / index() による文字列包含 / predicate 拡張 / crash log 範囲拡大
-- [ ] v2 を push → Codemagic で実走 → artifacts_002 を回収して真っ白原因を特定
-- [ ] 原因に応じて修正（cold start 遅延 → さらに sleep / クラッシュ → コード修正）
-- [ ] 音声検証は別途: AudioEngineController に offline render で短い WAV を吐く開発専用フックを追加し、CI_AUTOSTART 時に artifacts へ書き出す（v3）
+- [x] v2 を push → Codemagic で実走 → artifacts_002 を回収 → 真っ白原因を特定
+- [x] **真因特定**: Codemagic の headless mac mini で AVAudioEngine が CoreAudio HAL Initialize の RPC timeout で SIGABRT(9.5s で abort)
+      - syslog の決定打: `(AudioToolboxCore) Fault Initialize: RPC timeout. Apparently deadlocked. Aborting now.`
+      - probe.log で t+3s/t+7s で pid 生存、t+12s で消失と確認
+- [x] **v3 実装**: AudioEngineController に offline render モードを追加
+      - `Mode.offlineToWAV` で `enableManualRenderingMode(.offline, ...)` を attach/connect 前に呼ぶ → CoreAudio HAL を一切触らない
+      - `start()` が switch で realtime / offline 分岐
+      - offline: `engine.renderOffline()` でフレーム単位に書き込み → AVAudioFile（LinearPCM 16bit/44.1kHz/mono）として Documents/sine-440hz.wav へ
+      - Codex レビュー反映: manual rendering 有効化失敗時の fail-closed / `.cannotDoInCurrentContext` retry / frameLength=0 防御
+- [x] **codemagic.yaml v3**: WAV 回収・検証ステップを追加
+      - `simctl get_app_container ... data` でアプリ sandbox を取得し WAV をコピー
+      - ffprobe で 44.1kHz / 1ch / >= 2.5s を厳密検証、失敗で build を落とす
+      - sleep を 5/8/11s に調整（offline render 完了後のスクリーンショット）
+- [ ] v3 を push → Codemagic 実走 → artifacts_003 回収して以下を確認:
+      - スクリーンショットで Hypnoctone の UI（暗背景・ヘッダ・PulseView・Start/Stop ボタン）が描画される
+      - `sine-440hz.wav` を DL して 440Hz サイン波を実聴
+- [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信
 - [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信

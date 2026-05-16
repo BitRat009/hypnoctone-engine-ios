@@ -89,7 +89,7 @@ workflows:
           echo "Installing: $APP_PATH"
           xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
 
-      - name: Capture video + screenshots (diagnostic v2)
+      - name: Capture video + screenshots + WAV (v3 offline render)
         script: |
           set -euo pipefail
           mkdir -p "$ARTIFACTS_DIR"
@@ -145,22 +145,31 @@ workflows:
             echo "[probe $label] app pid: ${pid:-<not running>}" | tee -a "$ARTIFACTS_DIR/probe.log"
           }
 
-          # v1 では sleep 1 で真っ白だったので、iOS 18 cold start を見越して長めに伸ばす。
-          sleep 3
-          probe_app "t+3s"
-          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/01-launch.png"
-
-          sleep 4
-          probe_app "t+7s"
-          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/02-after-autostart.png"
-
+          # v3: AudioEngineController が offline render に切り替わり SIGABRT しない前提。
+          #     cold start + handleCIAutostart の 1.5s 遅延 + WAV render（数百ms）が
+          #     終わった頃合いで screenshot を撮る。
           sleep 5
-          probe_app "t+12s"
-          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/03-playing.png"
+          probe_app "t+5s"
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/01-after-render.png"
 
-          sleep 4
-          probe_app "t+16s"
-          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/04-late.png"
+          sleep 3
+          probe_app "t+8s"
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/02-stopped.png"
+
+          sleep 3
+          probe_app "t+11s"
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/03-late.png"
+
+          # ---- WAV をアプリ sandbox から回収（terminate より前に取らないとアプリが消える等の事故を避ける） ----
+          SANDBOX=$(xcrun simctl get_app_container "$DEVICE_UDID" "$BUNDLE_ID" data 2>/dev/null || true)
+          echo "App sandbox: $SANDBOX" | tee -a "$ARTIFACTS_DIR/probe.log"
+          if [ -n "$SANDBOX" ] && [ -f "$SANDBOX/Documents/sine-440hz.wav" ]; then
+            cp "$SANDBOX/Documents/sine-440hz.wav" "$ARTIFACTS_DIR/sine-440hz.wav"
+            echo "WAV copied to artifacts/" | tee -a "$ARTIFACTS_DIR/probe.log"
+          else
+            echo "WARNING: sine-440hz.wav not found in app sandbox" | tee -a "$ARTIFACTS_DIR/probe.log"
+            ls -la "$SANDBOX/Documents/" 2>&1 | tee -a "$ARTIFACTS_DIR/probe.log" || true
+          fi
 
           # 明示停止（trap でも回収されるが二重 kill は安全）
           xcrun simctl terminate "$DEVICE_UDID" "$BUNDLE_ID" || true
@@ -202,35 +211,54 @@ workflows:
           echo "--- syslog head ---"
           head -200 "$ARTIFACTS_DIR/syslog.log" || true
 
-      - name: Verify capture (audio stream check)
+      - name: Verify WAV (offline-rendered 440Hz sine)
         script: |
           set -euo pipefail
-          # recordVideo が音声トラックを含むかは公式に保証されていない。
-          # 検査して見つからなければ警告のみ（スクリーンショット & ログは取れているのでビルドは fail しない）。
+          # v3 の本命: AudioEngineController が manualRenderingMode で書き出した WAV を検査。
+          # WAV が無ければ build 失敗扱いとする（offline render が正しく動いたかが本ステップの目的）。
           if ! command -v ffprobe >/dev/null 2>&1; then
-            echo "ffprobe not available; skipping mp4 audio inspection."
+            echo "ffprobe not available; skipping WAV inspection."
             exit 0
           fi
-          PREVIEW="$ARTIFACTS_DIR/preview.mp4"
-          if [ ! -s "$PREVIEW" ]; then
-            echo "WARNING: $PREVIEW is empty or missing."
-            exit 0
+          WAV="$ARTIFACTS_DIR/sine-440hz.wav"
+          if [ ! -s "$WAV" ]; then
+            echo "ERROR: $WAV が無い、または空。offline render が失敗した可能性。"
+            exit 1
           fi
-          echo "--- ffprobe streams ---"
-          ffprobe -v error -show_streams "$PREVIEW" || true
-          AUDIO_STREAMS=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$PREVIEW" | wc -l | tr -d ' ')
-          echo "Audio streams: $AUDIO_STREAMS"
-          if [ "$AUDIO_STREAMS" -eq 0 ]; then
-            echo "WARNING: preview.mp4 に音声トラックが見つからない。録画方式の見直しが必要かもしれない。"
-          else
-            echo "OK: preview.mp4 contains audio."
+          echo "--- ffprobe streams (WAV) ---"
+          ffprobe -v error -show_format -show_streams "$WAV"
+          # 妥当性チェック: 44.1kHz / 1ch / 約 3 秒 を期待
+          DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WAV")
+          SAMPLE_RATE=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$WAV")
+          CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$WAV")
+          echo "duration=$DURATION sample_rate=$SAMPLE_RATE channels=$CHANNELS"
+          FAIL=0
+          if [ "$SAMPLE_RATE" != "44100" ]; then
+            echo "ERROR: sample rate が想定 (44100) と違う: $SAMPLE_RATE"
+            FAIL=1
           fi
+          if [ "$CHANNELS" != "1" ]; then
+            echo "ERROR: チャネル数が想定 (1) と違う: $CHANNELS"
+            FAIL=1
+          fi
+          # 3.0 秒分 render している想定。誤差を見越して 2.5 秒以上を要求。
+          # awk で float 比較（bash の test では浮動小数比較ができない）。
+          DURATION_OK=$(awk -v d="$DURATION" 'BEGIN { print (d+0 >= 2.5) ? 1 : 0 }')
+          if [ "$DURATION_OK" != "1" ]; then
+            echo "ERROR: duration が短すぎる (期待 >= 2.5s, 実際 $DURATION s)"
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            exit 1
+          fi
+          echo "OK: sine-440hz.wav は 44.1kHz / mono / >= 2.5s の妥当な WAV です。"
 
       - name: Shutdown simulator
         script: |
           xcrun simctl shutdown "$DEVICE_UDID" || true
 
     artifacts:
+      - artifacts/*.wav
       - artifacts/*.mp4
       - artifacts/*.png
       - artifacts/*.log
