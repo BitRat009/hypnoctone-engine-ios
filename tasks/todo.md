@@ -222,8 +222,40 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - 1 回目: Critical/High 無し、Medium 2 (CI が L/R 別検査不足 / 「平均」コメントが幾何平均と不一致)
       - 反映後: Codex 最終 OK
       - 軽微指摘: mono コメント → stereo に修正、44.1kHz/1ch コメント残骸も 2ch に
-- [ ] Phase 6: push → Codemagic → artifacts_011 で stereo 化を確認
-      - 期待: WAV channels=2、L≠R 検査クリア
-      - L チャネルで 220Hz 付近に detune 低側ピーク、R で detune 高側ピーク（Goertzel で確認）
-      - 差分波の RMS が一定以上（L/R 独立 noise の確証）
-      - クリッピング無し、fade 形状維持、crash 無し
+- [x] Phase 6: push → Codemagic → artifacts_011 で stereo 化を完全実証
+      - WAV: pcm_s16le / 44100Hz / **channels=2** / 4.09s（ファイルサイズも mono 比 2 倍）
+      - L_MAX=4713 / R_MAX=4666 / **DIFF_MAX=4465** （DIFF/L_MAX=95% = ほぼ完全独立）
+      - **L/R 別 Goertzel FFT で detune を実証**:
+        - 220Hz 声: L 側 219.87Hz mag=2454 / R 側 220.13Hz mag=2455 が誤差 1 で完全対称
+        - 5度 330Hz 声: L 329.81 (1308) >> R 329.81 (122)、R 330.19 (1309) >> L 330.19 (127)
+        - オクターブ 440Hz 声: 同様に L 低側 / R 高側で対称
+      - 中心周波数 (220/330/440) の mag は L/R で完全一致（幾何平均が厳密に保たれている証拠）
+      - crash 無し（pid 1894 が全 probe で生存）
+      - 設計（3 声 × L/R detune × 独立 PRNG）が全部正しく機能していることが完全実証された
+
+## Task 11 — 音質アップ第 3 弾: LFO ゆらぎ（pitch vibrato）
+
+- [x] Phase 1: ToneRenderState に LFO state 追加
+      - 定数: lfoDepthCents, lfoPhaseIncrement (2π / (period × sr))
+      - audio thread 単一所有: lfoPhase（init で initialPhase 設定可）
+      - init に lfoPeriodSeconds / lfoDepthCents / lfoInitialPhase パラメータ追加
+- [x] Phase 2: DroneGenerator render block に LFO 組み込み
+      - **ブロック単位で 1 回**だけ sin/pow を計算（5.8ms ごと、cent 誤差 0.007cent でクラックは可）
+      - lfoMod = pow(2, sin(lfoPhase) * depthCents / 1200)
+      - phaseIncrementLeft/Right に lfoMod 乗算 → ブロック内ループで使用
+      - phase 自体は連続維持なのでクリックノイズなし
+      - lfoPhase はブロック末尾で frameCount サンプル分進めて 2π 折り返し
+      - depth=0 で modRatio=1 = 実質 LFO 無効（後方互換）
+- [x] Phase 3: AudioEngineController で 3 声に独立 LFO 設定
+      - 基音 220Hz: period 17.3s / depth 2.5cent / phase 0
+      - 5度 330Hz: period 23.1s / depth 2.0cent / phase π/2
+      - オクターブ 440Hz: period 13.7s / depth 1.5cent / phase π
+      - 素数寄り周期で「揃わない」「無限に変化し続ける」音響
+- [x] Phase 4: Codex レビュー
+      - Critical/High/Medium 全てなし、最終 OK 一発で取得
+      - 軽微指摘「最小公倍数が事実上発散」表現を「互いに約分しにくい比」に修正
+- [ ] Phase 5: push → Codemagic → artifacts_012 で LFO 効果を確認
+      - 期待: WAV stereo 維持、L/R 検査クリア、振幅エンベロープは LFO で変化しないので Task 10 同様
+      - Goertzel で固定周波数 mag が Task 10 比で少し下がる（エネルギーが ±cent 範囲に分散）
+      - 周辺周波数 (±数 Hz) のエネルギー和は維持される予測
+      - crash 無し、クリッピング無し

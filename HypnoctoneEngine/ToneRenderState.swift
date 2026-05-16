@@ -95,14 +95,25 @@ final class ToneRenderState {
     /// 2π（位相の1周）。
     let twoPi: Double = 2.0 * Double.pi
 
-    /// L チャネル用の 1 サンプル位相増分（ラジアン）。
+    /// L チャネル用の 1 サンプル位相増分（ラジアン）。**LFO 中立時の基準値**。
+    /// LFO 有効時、render block 先頭で `phaseIncrementLeft * lfoModRatio` を計算して
+    /// そのブロック内のサンプル進行に使う。
     let phaseIncrementLeft: Double
 
-    /// R チャネル用の 1 サンプル位相増分（ラジアン）。
+    /// R チャネル用の 1 サンプル位相増分（ラジアン）。**LFO 中立時の基準値**。
     let phaseIncrementRight: Double
 
     /// 定常状態の基本振幅。
     let defaultAmplitude: Float
+
+    // MARK: - LFO（pitch vibrato）— 定数
+
+    /// LFO 深さ（cent、±この値で pitch が揺れる）。0 なら LFO 無効。
+    /// 例: 2.5cent なら 220Hz 基音時に ±0.32Hz の周期的 detune。
+    let lfoDepthCents: Double
+
+    /// LFO の 1 サンプルあたり位相増分（ラジアン）。`2π / (lfoPeriodSeconds × sampleRate)`。
+    let lfoPhaseIncrement: Double
 
     // MARK: - Audio thread 単一所有（writer/reader とも audio thread のみ）
 
@@ -111,6 +122,10 @@ final class ToneRenderState {
 
     /// R チャネルの現在の位相（ラジアン）。
     var phaseRight: Double = 0.0
+
+    /// LFO（pitch vibrato）の現在位相（ラジアン）。audio thread 単一所有。
+    /// 1 ブロック (frameCount サンプル) 進めるたびに `lfoPhaseIncrement * frameCount` だけ加算。
+    var lfoPhase: Double
 
     /// 現在の振幅（サンプル単位に補間された値）。
     var currentAmplitude: Float = 0.0
@@ -151,11 +166,18 @@ final class ToneRenderState {
     ///   - detuneCents: L/R 間の周波数差（cent）。L=中心-detune/2、R=中心+detune/2 になる。
     ///     1 オクターブ = 1200 cent。Sleep 用途では 2 cent 程度で 220Hz 基音で約 4 秒周期の
     ///     ゆるいビートが出て「広がり感」と「ゆらぎ感」を兼ねる。0 を渡せば L=R で真 mono 互換。
+    ///   - lfoPeriodSeconds: LFO（pitch vibrato）の周期（秒）。Sleep 用途では 10〜30 秒程度の
+    ///     超低周波が自然。0 以下を渡せば LFO 無効（depth を 0 にしてもよい）。
+    ///   - lfoDepthCents: LFO 深さ（cent、±この値で pitch が揺れる）。0 で LFO 無効。
+    ///   - lfoInitialPhase: LFO の初期位相（ラジアン）。複数声で位相をずらしてゆらぎが揃わないようにする。
     ///   - defaultAmplitude: 定常時の基本振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         frequency: Double,
         sampleRate: Double,
         detuneCents: Double = 2.0,
+        lfoPeriodSeconds: Double = 0.0,
+        lfoDepthCents: Double = 0.0,
+        lfoInitialPhase: Double = 0.0,
         defaultAmplitude: Float = 0.2
     ) {
         self.frequency = frequency
@@ -171,5 +193,14 @@ final class ToneRenderState {
 
         self.phaseIncrementLeft = twoPi * frequencyLeft / sampleRate
         self.phaseIncrementRight = twoPi * frequencyRight / sampleRate
+
+        // LFO 計算: period > 0 のとき有効、それ以外は increment=0 で実質無効化。
+        self.lfoDepthCents = lfoDepthCents
+        if lfoPeriodSeconds > 0 {
+            self.lfoPhaseIncrement = twoPi / (lfoPeriodSeconds * sampleRate)
+        } else {
+            self.lfoPhaseIncrement = 0.0
+        }
+        self.lfoPhase = lfoInitialPhase
     }
 }

@@ -5,7 +5,7 @@ import os
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
 /// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
-/// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune）と
+/// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune、各声に独立 LFO で pitch vibrato）と
 /// `NoiseGenerator`（ピンクノイズ、L/R 独立 PRNG）に委譲し、`mainMixerNode` で並列ミックスする。
 /// 出力フォーマットは 2ch stereo（Task 10 から）。音声ファイル・録音素材・ループ素材は一切使わない。
 ///
@@ -136,8 +136,13 @@ final class AudioEngineController {
         // 多声 Drone: 基音 / 完全 5度 / オクターブ。振幅は基音強め、上倍音を弱めて
         // 自然な厚みを作る。
         //
+        // 各声に異なる LFO（pitch vibrato）周期・深さ・初期位相を割り当て、
+        // 3 声のゆらぎが揃わない（時間軸で複雑に変化し続ける）ようにする。周期は素数寄りの
+        // 13.7 / 17.3 / 23.1 秒で、互いに約分しにくい比のため聴感上の繰り返しが目立たない。
+        //
         // Headroom 評価:
         //   - Drone 3 声は純サイン波で peak 厳密上限 = 0.15 + 0.08 + 0.05 = 0.28
+        //     （LFO は pitch のみで amplitude には影響しないので peak 上限は不変）
         //   - Noise は Paul Kellet's filter 出力で defaultAmplitude=0.05 を係数とした
         //     統計的振幅（厳密に [-0.05, 0.05] に収まる保証は無いが実測でほぼこのオーダー）
         //   - 合算で実効ピークは 0.3 前後
@@ -146,9 +151,21 @@ final class AudioEngineController {
         let fifthFrequency = rootFrequency * 1.5
         let octaveFrequency = rootFrequency * 2.0
         self.droneGenerators = [
-            DroneGenerator(format: format, frequency: rootFrequency,   defaultAmplitude: 0.15),
-            DroneGenerator(format: format, frequency: fifthFrequency,  defaultAmplitude: 0.08),
-            DroneGenerator(format: format, frequency: octaveFrequency, defaultAmplitude: 0.05),
+            DroneGenerator(
+                format: format, frequency: rootFrequency,
+                lfoPeriodSeconds: 17.3, lfoDepthCents: 2.5, lfoInitialPhase: 0.0,
+                defaultAmplitude: 0.15
+            ),
+            DroneGenerator(
+                format: format, frequency: fifthFrequency,
+                lfoPeriodSeconds: 23.1, lfoDepthCents: 2.0, lfoInitialPhase: .pi / 2,
+                defaultAmplitude: 0.08
+            ),
+            DroneGenerator(
+                format: format, frequency: octaveFrequency,
+                lfoPeriodSeconds: 13.7, lfoDepthCents: 1.5, lfoInitialPhase: .pi,
+                defaultAmplitude: 0.05
+            ),
         ]
         self.noiseGenerator = NoiseGenerator(format: format)
 

@@ -6,7 +6,8 @@ import os
 ///
 /// L/R で `detuneCents` だけ周波数をずらした stereo サイン波を出力する。
 /// detune によるゆるいビート（基音 220Hz / detune 2cent で約 4 秒周期）が
-/// 「広がり感」と「揺らぎ感」を同時に与え、Sleep 用途で疲れない音場を作る。
+/// 「広がり感」を、`lfoDepthCents` > 0 のときは LFO（pitch vibrato）が
+/// 周期数十秒の超低周波で「揺らぎ感」を与え、Sleep 用途で疲れない音場を作る。
 /// `AudioEngineController` がこの Generator を保持し、`AVAudioEngine` に attach する。
 ///
 /// ## スレッドモデル
@@ -60,11 +61,17 @@ final class DroneGenerator {
     ///   - frequency: 生成するサイン波の中心周波数（Hz）。既定は 220Hz (A3)。
     ///                Sleep モード方針として 440Hz より低めの落ち着いた音域を採用。
     ///   - detuneCents: L/R 間の周波数差（cent）。既定 2.0。0 で真 mono 互換。
+    ///   - lfoPeriodSeconds: LFO（pitch vibrato）の周期（秒）。0 で無効。Sleep 用途では 10〜30 秒。
+    ///   - lfoDepthCents: LFO 深さ（cent）。0 で無効。detune と同等の ±数 cent が自然。
+    ///   - lfoInitialPhase: LFO 初期位相（ラジアン）。複数声で位相をずらすと揺れが揃わない。
     ///   - defaultAmplitude: 定常時の振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         format: AVAudioFormat,
         frequency: Double = 220.0,
         detuneCents: Double = 2.0,
+        lfoPeriodSeconds: Double = 0.0,
+        lfoDepthCents: Double = 0.0,
+        lfoInitialPhase: Double = 0.0,
         defaultAmplitude: Float = 0.2
     ) {
         self.sourceFormat = format
@@ -74,6 +81,9 @@ final class DroneGenerator {
             frequency: frequency,
             sampleRate: format.sampleRate,
             detuneCents: detuneCents,
+            lfoPeriodSeconds: lfoPeriodSeconds,
+            lfoDepthCents: lfoDepthCents,
+            lfoInitialPhase: lfoInitialPhase,
             defaultAmplitude: defaultAmplitude
         )
 
@@ -125,9 +135,33 @@ final class DroneGenerator {
             // g1 が odd の場合: writer が今まさに書き込み中。
             // active 据え置きで次ブロックの retry に任せる。
 
+            // ---- LFO （pitch vibrato）modRatio をブロック先頭で 1 回計算 ----
+            //
+            // 1 サンプル単位で sin/pow を呼ぶと audio thread 負荷が上がるので、
+            // 「LFO は超低周波 (周期 10〜30s) で 5ms ブロック内では変化が無視できる」前提で
+            // ブロック先頭で 1 回だけ modRatio を算出し、ブロック内は固定値として使う。
+            // 周期 10s / 44.1kHz / frameCount=256 だと 1 ブロックあたり LFO 位相は約 2π/1722
+            //  ≈ 0.0036 rad しか進まないので、ブロック内の cent 誤差は深さ 2.5cent でも
+            //  最大 0.009cent (約 0.00002Hz @220Hz) で実用上完全に無視できる。
+            //
+            // depth=0 のときは modRatio=1.0 で実質 LFO 無効。
+            var lfoPhase = state.lfoPhase
+            let lfoMod: Double
+            if state.lfoDepthCents != 0.0 {
+                let lfoSample = sin(lfoPhase)
+                let modCents = lfoSample * state.lfoDepthCents
+                lfoMod = pow(2.0, modCents / 1200.0)
+            } else {
+                lfoMod = 1.0
+            }
+
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
-            let phaseIncrementLeft = state.phaseIncrementLeft
-            let phaseIncrementRight = state.phaseIncrementRight
+            //
+            // 基準 phaseIncrement に LFO modRatio を乗算してブロック内で使う。
+            // phase（位相）自体は連続なので、modRatio がブロック境界で変わっても
+            // クリックノイズは出ない（位相の進み速度だけが滑らかに変わる）。
+            let phaseIncrementLeft = state.phaseIncrementLeft * lfoMod
+            let phaseIncrementRight = state.phaseIncrementRight * lfoMod
             let twoPi = state.twoPi
             var phaseLeft = state.phaseLeft
             var phaseRight = state.phaseRight
@@ -166,10 +200,19 @@ final class DroneGenerator {
                 }
             }
 
+            // LFO phase をブロック分（frameCount サンプル）進めて折り返す。
+            // depth=0 のときも phase は進めるが、影響は無い（modRatio=1.0 で済むため）。
+            lfoPhase += state.lfoPhaseIncrement * Double(frameCount)
+            // 2π を大きく超える前に折り返す（数値精度の劣化防止）。
+            if lfoPhase >= twoPi {
+                lfoPhase = lfoPhase.truncatingRemainder(dividingBy: twoPi)
+            }
+
             state.phaseLeft = phaseLeft
             state.phaseRight = phaseRight
             state.currentAmplitude = amplitude
             state.activeFadeFramesRemaining = framesRemaining
+            state.lfoPhase = lfoPhase
             return noErr
         }
     }
