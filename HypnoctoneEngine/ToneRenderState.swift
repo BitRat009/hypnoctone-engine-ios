@@ -79,8 +79,15 @@ final class ToneRenderState {
 
     // MARK: - 定数
 
-    /// 生成するサイン波の周波数（Hz）。
+    /// 生成するサイン波の中心周波数（Hz）。L/R の幾何平均がこの値になる
+    /// （L = freq × 2^(-detune/2400), R = freq × 2^(detune/2400) なので √(fL × fR) = freq）。
     let frequency: Double
+
+    /// L チャネル用の実周波数（Hz）。中心から detune の半分だけ低い側。
+    let frequencyLeft: Double
+
+    /// R チャネル用の実周波数（Hz）。中心から detune の半分だけ高い側。
+    let frequencyRight: Double
 
     /// レンダリングに使うサンプルレート（Hz）。
     let sampleRate: Double
@@ -88,16 +95,22 @@ final class ToneRenderState {
     /// 2π（位相の1周）。
     let twoPi: Double = 2.0 * Double.pi
 
-    /// 1サンプルあたりの位相増分（ラジアン）。
-    let phaseIncrement: Double
+    /// L チャネル用の 1 サンプル位相増分（ラジアン）。
+    let phaseIncrementLeft: Double
+
+    /// R チャネル用の 1 サンプル位相増分（ラジアン）。
+    let phaseIncrementRight: Double
 
     /// 定常状態の基本振幅。
     let defaultAmplitude: Float
 
     // MARK: - Audio thread 単一所有（writer/reader とも audio thread のみ）
 
-    /// 現在の位相（ラジアン）。
-    var phase: Double = 0.0
+    /// L チャネルの現在の位相（ラジアン）。
+    var phaseLeft: Double = 0.0
+
+    /// R チャネルの現在の位相（ラジアン）。
+    var phaseRight: Double = 0.0
 
     /// 現在の振幅（サンプル単位に補間された値）。
     var currentAmplitude: Float = 0.0
@@ -132,13 +145,31 @@ final class ToneRenderState {
     // MARK: - 初期化
 
     /// - Parameters:
-    ///   - frequency: サイン波の周波数（Hz）。
+    ///   - frequency: サイン波の中心周波数（Hz）。L/R は中心を保って `detuneCents` の半分ずつ
+    ///     両側に振られる。
     ///   - sampleRate: レンダリングのサンプルレート（Hz）。
+    ///   - detuneCents: L/R 間の周波数差（cent）。L=中心-detune/2、R=中心+detune/2 になる。
+    ///     1 オクターブ = 1200 cent。Sleep 用途では 2 cent 程度で 220Hz 基音で約 4 秒周期の
+    ///     ゆるいビートが出て「広がり感」と「ゆらぎ感」を兼ねる。0 を渡せば L=R で真 mono 互換。
     ///   - defaultAmplitude: 定常時の基本振幅（0.0〜1.0）。既定は小音量の 0.2。
-    init(frequency: Double, sampleRate: Double, defaultAmplitude: Float = 0.2) {
+    init(
+        frequency: Double,
+        sampleRate: Double,
+        detuneCents: Double = 2.0,
+        defaultAmplitude: Float = 0.2
+    ) {
         self.frequency = frequency
         self.sampleRate = sampleRate
         self.defaultAmplitude = defaultAmplitude
-        self.phaseIncrement = twoPi * frequency / sampleRate
+
+        // cent → 周波数比: ratio = 2^(cents/1200)
+        let halfCents = detuneCents / 2.0
+        let ratioLow = pow(2.0, -halfCents / 1200.0)
+        let ratioHigh = pow(2.0, halfCents / 1200.0)
+        self.frequencyLeft = frequency * ratioLow
+        self.frequencyRight = frequency * ratioHigh
+
+        self.phaseIncrementLeft = twoPi * frequencyLeft / sampleRate
+        self.phaseIncrementRight = twoPi * frequencyRight / sampleRate
     }
 }

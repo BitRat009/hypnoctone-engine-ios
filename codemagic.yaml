@@ -232,7 +232,7 @@ workflows:
           fi
           echo "--- ffprobe streams (WAV) ---"
           ffprobe -v error -show_format -show_streams "$WAV"
-          # 妥当性チェック: 44.1kHz / 1ch / 約 3 秒 を期待
+          # 妥当性チェック: 44.1kHz / 2ch (stereo) / 約 4 秒 を期待
           DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WAV")
           SAMPLE_RATE=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$WAV")
           CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$WAV")
@@ -242,8 +242,8 @@ workflows:
             echo "ERROR: sample rate が想定 (44100) と違う: $SAMPLE_RATE"
             FAIL=1
           fi
-          if [ "$CHANNELS" != "1" ]; then
-            echo "ERROR: チャネル数が想定 (1) と違う: $CHANNELS"
+          if [ "$CHANNELS" != "2" ]; then
+            echo "ERROR: チャネル数が想定 (2 = stereo) と違う: $CHANNELS"
             FAIL=1
           fi
           # Task 5 で fade-in 0.8s + 定常 2.4s + fade-out 0.8s = 4.0 秒分 render する想定。
@@ -254,10 +254,40 @@ workflows:
             echo "ERROR: duration が短すぎる (期待 >= 3.5s, 実際 $DURATION s)"
             FAIL=1
           fi
+          # ---- L/R それぞれが無音でない、かつ L != R であることを確認 ----
+          # channels=2 のチェックだけだと「両 ch とも信号がある」「L/R が同一でない」を
+          # 検出できない。ffmpeg の pan filter で L / R / (L-R) を s16le raw に変換して
+          # max-abs を測る。Task 10 の detune / 独立 PRNG が効いていれば DIFF は十分大きい。
+          measure_max_abs() {
+            local pan_expr="$1"
+            ffmpeg -hide_banner -nostats -loglevel error \
+              -i "$WAV" -af "pan=mono|$pan_expr" -f s16le -acodec pcm_s16le - 2>/dev/null \
+              | od -A n -t d2 -v \
+              | awk 'BEGIN { m=0 } { for (i=1;i<=NF;i++) { v=$i; if (v<0) v=-v; if (v>m) m=v } } END { print m+0 }'
+          }
+          L_MAX=$(measure_max_abs "c0=c0")
+          R_MAX=$(measure_max_abs "c0=c1")
+          DIFF_MAX=$(measure_max_abs "c0=0.5*c0-0.5*c1")
+          echo "stereo check: L_MAX=$L_MAX  R_MAX=$R_MAX  DIFF_MAX=$DIFF_MAX"
+          # しきい値: L/R がそれぞれ最低 500（s16 で 0.015）、L-R 差分が 100（0.003）以上。
+          # 500 は Drone fade-in 終端や Noise だけでも余裕で超える水準。
+          # 100 は detune ビート + 独立 PRNG ノイズが効いていれば必ず超える。
+          if [ "${L_MAX:-0}" -lt 500 ]; then
+            echo "ERROR: L チャネルが想定より弱い (max=$L_MAX, 期待 >= 500)"
+            FAIL=1
+          fi
+          if [ "${R_MAX:-0}" -lt 500 ]; then
+            echo "ERROR: R チャネルが想定より弱い (max=$R_MAX, 期待 >= 500)"
+            FAIL=1
+          fi
+          if [ "${DIFF_MAX:-0}" -lt 100 ]; then
+            echo "ERROR: L/R 差分が小さすぎる (max=$DIFF_MAX, 期待 >= 100)。stereo 化が機能していない可能性。"
+            FAIL=1
+          fi
           if [ "$FAIL" = "1" ]; then
             exit 1
           fi
-          echo "OK: sleep-mix.wav は 44.1kHz / mono / >= 3.5s の妥当な WAV です。"
+          echo "OK: sleep-mix.wav は 44.1kHz / stereo (2ch) / >= 3.5s / L≠R の妥当な WAV です。"
 
       - name: Shutdown simulator
         script: |

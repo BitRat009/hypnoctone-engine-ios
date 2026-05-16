@@ -19,6 +19,7 @@ import os
 /// ## ピンクノイズ生成
 /// xorshift32 PRNG でホワイトノイズを生成し、Paul Kellet's 7 段 IIR filter で
 /// ピンクスペクトラム（約 -3dB/oct）に整形する。係数は定数。
+/// L/R で独立した PRNG seed と filter state を使い、相関ゼロの真ステレオノイズを生成する。
 ///
 /// ## fade ロジック（odd/even seqlock）
 /// `DroneGenerator` と同じプロトコル。詳細は `ToneRenderState` のコメント参照。
@@ -30,7 +31,8 @@ final class NoiseGenerator {
     /// AVAudioEngine に attach する source node。
     let sourceNode: AVAudioSourceNode
 
-    /// この Generator の出力フォーマット（mono / Float32）。
+    /// この Generator の出力フォーマット（stereo / Float32）。
+    /// mono を渡された場合は L/R を平均化して 1ch にダウンミックスして出力する（後方互換）。
     let sourceFormat: AVAudioFormat
 
     /// 定常時の振幅（フェード完了後の目標値）。
@@ -98,15 +100,18 @@ final class NoiseGenerator {
             let target = state.activeTargetAmplitude
             var framesRemaining = state.activeFadeFramesRemaining
 
-            // PRNG と pink filter の state をローカル変数に移し、ループ内で更新後に書き戻す。
-            var prng = state.prngState
-            var b0 = state.b0
-            var b1 = state.b1
-            var b2 = state.b2
-            var b3 = state.b3
-            var b4 = state.b4
-            var b5 = state.b5
-            var b6 = state.b6
+            // L/R 独立の PRNG state / pink filter state をローカル変数に移す。
+            var prngL = state.prngStateLeft
+            var prngR = state.prngStateRight
+            var b0L = state.b0L, b1L = state.b1L, b2L = state.b2L, b3L = state.b3L
+            var b4L = state.b4L, b5L = state.b5L, b6L = state.b6L
+            var b0R = state.b0R, b1R = state.b1R, b2R = state.b2R, b3R = state.b3R
+            var b4R = state.b4R, b5R = state.b5R, b6R = state.b6R
+
+            // stereo: 2 buffer (L=0, R=1) / mono fallback: 1 buffer に (L+R)/2 を書く。
+            let isStereo = ablPointer.count >= 2
+            let bufferL = UnsafeMutableBufferPointer<Float>(ablPointer[0])
+            let bufferR = isStereo ? UnsafeMutableBufferPointer<Float>(ablPointer[1]) : bufferL
 
             for frame in 0..<Int(frameCount) {
                 // フェード残りがあれば 1 サンプル分だけ target に近づける。
@@ -118,42 +123,54 @@ final class NoiseGenerator {
                     amplitude = target
                 }
 
-                // xorshift32: state を更新して新しい疑似乱数を生成。
-                prng ^= prng &<< 13
-                prng ^= prng &>> 17
-                prng ^= prng &<< 5
-                // 上位 24bit を [-1, 1) Float にマップ。
-                let white = Float(prng &>> 8) * invFloat24 - 1.0
+                // ---- L チャネルのピンクノイズ生成 ----
+                prngL ^= prngL &<< 13
+                prngL ^= prngL &>> 17
+                prngL ^= prngL &<< 5
+                let whiteL = Float(prngL &>> 8) * invFloat24 - 1.0
+                b0L = 0.99886 * b0L + whiteL * 0.0555179
+                b1L = 0.99332 * b1L + whiteL * 0.0750759
+                b2L = 0.96900 * b2L + whiteL * 0.1538520
+                b3L = 0.86650 * b3L + whiteL * 0.3104856
+                b4L = 0.55000 * b4L + whiteL * 0.5329522
+                b5L = -0.7616 * b5L - whiteL * 0.0168980
+                let pinkL = (b0L + b1L + b2L + b3L + b4L + b5L + b6L + whiteL * 0.5362) * 0.11
+                b6L = whiteL * 0.115926
 
-                // Paul Kellet's pink filter（係数は固定）。
-                b0 = 0.99886 * b0 + white * 0.0555179
-                b1 = 0.99332 * b1 + white * 0.0750759
-                b2 = 0.96900 * b2 + white * 0.1538520
-                b3 = 0.86650 * b3 + white * 0.3104856
-                b4 = 0.55000 * b4 + white * 0.5329522
-                b5 = -0.7616 * b5 - white * 0.0168980
-                let pink = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11
-                b6 = white * 0.115926
+                // ---- R チャネルのピンクノイズ生成（独立 PRNG / filter state） ----
+                prngR ^= prngR &<< 13
+                prngR ^= prngR &>> 17
+                prngR ^= prngR &<< 5
+                let whiteR = Float(prngR &>> 8) * invFloat24 - 1.0
+                b0R = 0.99886 * b0R + whiteR * 0.0555179
+                b1R = 0.99332 * b1R + whiteR * 0.0750759
+                b2R = 0.96900 * b2R + whiteR * 0.1538520
+                b3R = 0.86650 * b3R + whiteR * 0.3104856
+                b4R = 0.55000 * b4R + whiteR * 0.5329522
+                b5R = -0.7616 * b5R - whiteR * 0.0168980
+                let pinkR = (b0R + b1R + b2R + b3R + b4R + b5R + b6R + whiteR * 0.5362) * 0.11
+                b6R = whiteR * 0.115926
 
-                let sample = pink * amplitude
+                let sampleL = pinkL * amplitude
+                let sampleR = pinkR * amplitude
 
-                for buffer in ablPointer {
-                    let bufferPointer = UnsafeMutableBufferPointer<Float>(buffer)
-                    bufferPointer[frame] = sample
+                if isStereo {
+                    bufferL[frame] = sampleL
+                    bufferR[frame] = sampleR
+                } else {
+                    bufferL[frame] = (sampleL + sampleR) * 0.5
                 }
             }
 
             // 更新後の state を書き戻す。
             state.currentAmplitude = amplitude
             state.activeFadeFramesRemaining = framesRemaining
-            state.prngState = prng
-            state.b0 = b0
-            state.b1 = b1
-            state.b2 = b2
-            state.b3 = b3
-            state.b4 = b4
-            state.b5 = b5
-            state.b6 = b6
+            state.prngStateLeft = prngL
+            state.prngStateRight = prngR
+            state.b0L = b0L; state.b1L = b1L; state.b2L = b2L; state.b3L = b3L
+            state.b4L = b4L; state.b5L = b5L; state.b6L = b6L
+            state.b0R = b0R; state.b1R = b1R; state.b2R = b2R; state.b3R = b3R
+            state.b4R = b4R; state.b5R = b5R; state.b6R = b6R
             return noErr
         }
     }

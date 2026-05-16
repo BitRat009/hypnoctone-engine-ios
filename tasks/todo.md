@@ -188,7 +188,42 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Phase 2: Codex レビュー
       - 初回: Medium 1 件（振幅コメントの厳密性 — Noise は厳密上限保証されないので断言を弱める）
       - 反映後: Critical/High/Medium 全て無しで最終 OK
-- [ ] Phase 3: push → Codemagic → artifacts_010 で和音化を確認
-      - 期待: WAV 仕様維持、定常区間で 220/330/440Hz のピークが FFT で見える
-      - 振幅エンベロープの fade 形状維持
-      - クリッピング無し（max が 16bit 上限 32767 から余裕あり）
+- [x] Phase 3: push → Codemagic → artifacts_010 で和音化を確認
+      - WAV 仕様: pcm_s16le / 44100Hz / 1ch / 4.09s ✓
+      - crash 無し（probe t+5s の「not running」は起動シーケンスの一時的タイミング、t+8s 以降生存）
+      - **Goertzel FFT 定常区間 2.4 秒で 3 周波数のピークを実証**:
+        - 220Hz mag=1739 / 330Hz mag=924 / 440Hz mag=579
+        - 対照点 (100/550/880Hz) は mag 1.4〜2.1 でフラット → SNR 1000 倍超
+        - 実測比 1.00:0.53:0.33 が設計比 0.15:0.08:0.05 = 1.00:0.53:0.33 と**完全一致**
+      - 振幅エンベロープ: fade-in 線形 / 定常 max ~3200 / fade-out 線形（Task 8 max=2750 から +20% で 3 声合算の peak 上昇を反映）
+      - RMS は 1455（Task 8 の 1640 から低下 = 基音 amp 0.2→0.15 化が支配的、上倍音は RMS に寄与少、理論一致）
+      - クリッピング余裕十分（max 3296 / 32767 = 0.10）
+
+## Task 10 — 音質アップ第 2 弾: ステレオ化（L/R detune + 独立 PRNG ノイズ）
+
+- [x] Phase 1: ToneRenderState + DroneGenerator を stereo + L/R detune 対応
+      - ToneRenderState に frequencyLeft/Right, phaseIncrementLeft/Right, phaseLeft/Right を追加
+      - init に `detuneCents: Double = 2.0` 追加、L=freq×2^(-c/2400) / R=freq×2^(c/2400) で幾何平均が元 freq になる
+      - DroneGenerator init にも detuneCents パラメータ、render block を L/R 別 phase で書き換え
+      - 2.0 cent で 220Hz 基音時に約 4 秒周期のゆるいビート → Sleep に最適なゆらぎ
+- [x] Phase 2: NoiseRenderState + NoiseGenerator を stereo 対応
+      - NoiseRenderState に prngStateLeft/Right, b0..6 L/R 独立 filter state を追加
+      - L=0xCAFEBABE / R=0xDEADBEEF の独立 seed で相関ゼロの真ステレオピンクノイズ
+      - NoiseGenerator render block を L/R 独立に xorshift32 + Paul Kellet's で書き換え
+- [x] Phase 3: AudioEngineController を stereo format / WAV channels=2 対応
+      - AVAudioFormat channels: 1 → 2
+      - AVAudioFile fileSettings の AVNumberOfChannelsKey: 1 → 2
+      - mainMixerNode → outputNode の最終変換は AVAudioEngine 任せで動く想定
+- [x] Phase 4: codemagic.yaml の ffprobe 検査を channels=2 / L≠R に強化
+      - 単純な channels=2 だけだと「片 ch silent」「L/R 同一」を検出できない
+      - ffmpeg `pan=mono|c0=c0/c0=c1/c0=0.5*c0-0.5*c1` で L/R/差分を抽出し max-abs を測定
+      - L_MAX >= 500, R_MAX >= 500, DIFF_MAX >= 100 を要求
+- [x] Phase 5: Codex レビュー
+      - 1 回目: Critical/High 無し、Medium 2 (CI が L/R 別検査不足 / 「平均」コメントが幾何平均と不一致)
+      - 反映後: Codex 最終 OK
+      - 軽微指摘: mono コメント → stereo に修正、44.1kHz/1ch コメント残骸も 2ch に
+- [ ] Phase 6: push → Codemagic → artifacts_011 で stereo 化を確認
+      - 期待: WAV channels=2、L≠R 検査クリア
+      - L チャネルで 220Hz 付近に detune 低側ピーク、R で detune 高側ピーク（Goertzel で確認）
+      - 差分波の RMS が一定以上（L/R 独立 noise の確証）
+      - クリッピング無し、fade 形状維持、crash 無し

@@ -4,8 +4,9 @@ import os
 
 /// Sleep モード基底音となる Drone（持続音）を生成する。
 ///
-/// 現段階では単一周波数のサイン波を生成するだけ。将来的に倍音や微妙な
-/// モジュレーション、複数声の重ね合わせを加える余地を残した分離レイヤー。
+/// L/R で `detuneCents` だけ周波数をずらした stereo サイン波を出力する。
+/// detune によるゆるいビート（基音 220Hz / detune 2cent で約 4 秒周期）が
+/// 「広がり感」と「揺らぎ感」を同時に与え、Sleep 用途で疲れない音場を作る。
 /// `AudioEngineController` がこの Generator を保持し、`AVAudioEngine` に attach する。
 ///
 /// ## スレッドモデル
@@ -31,7 +32,8 @@ final class DroneGenerator {
     /// AVAudioEngine に attach する source node。
     let sourceNode: AVAudioSourceNode
 
-    /// この Generator の出力フォーマット（mono / Float32）。
+    /// この Generator の出力フォーマット（stereo / Float32）。
+    /// mono を渡された場合は L/R を平均化して 1ch にダウンミックスして出力する（後方互換）。
     let sourceFormat: AVAudioFormat
 
     /// 定常時の振幅（フェード完了後の目標値）。
@@ -54,12 +56,15 @@ final class DroneGenerator {
     /// - Parameters:
     ///   - format: source node の出力フォーマット。`AudioEngineController` 側で一度
     ///             生成済みのものを共有する（manual rendering でも同じ format を使う）。
-    ///   - frequency: 生成するサイン波の周波数（Hz）。既定は 220Hz (A3)。
+    ///             stereo (2ch) を想定するが mono (1ch) でも動く（mono の場合 L/R を平均化）。
+    ///   - frequency: 生成するサイン波の中心周波数（Hz）。既定は 220Hz (A3)。
     ///                Sleep モード方針として 440Hz より低めの落ち着いた音域を採用。
+    ///   - detuneCents: L/R 間の周波数差（cent）。既定 2.0。0 で真 mono 互換。
     ///   - defaultAmplitude: 定常時の振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         format: AVAudioFormat,
         frequency: Double = 220.0,
+        detuneCents: Double = 2.0,
         defaultAmplitude: Float = 0.2
     ) {
         self.sourceFormat = format
@@ -68,6 +73,7 @@ final class DroneGenerator {
         self.renderState = ToneRenderState(
             frequency: frequency,
             sampleRate: format.sampleRate,
+            detuneCents: detuneCents,
             defaultAmplitude: defaultAmplitude
         )
 
@@ -120,12 +126,19 @@ final class DroneGenerator {
             // active 据え置きで次ブロックの retry に任せる。
 
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
-            let phaseIncrement = state.phaseIncrement
+            let phaseIncrementLeft = state.phaseIncrementLeft
+            let phaseIncrementRight = state.phaseIncrementRight
             let twoPi = state.twoPi
-            var phase = state.phase
+            var phaseLeft = state.phaseLeft
+            var phaseRight = state.phaseRight
             var amplitude = state.currentAmplitude
             let target = state.activeTargetAmplitude
             var framesRemaining = state.activeFadeFramesRemaining
+
+            // stereo: 2 buffer (L=0, R=1) / mono fallback: 1 buffer に (L+R)/2 を書く。
+            let isStereo = ablPointer.count >= 2
+            let bufferL = UnsafeMutableBufferPointer<Float>(ablPointer[0])
+            let bufferR = isStereo ? UnsafeMutableBufferPointer<Float>(ablPointer[1]) : bufferL
 
             for frame in 0..<Int(frameCount) {
                 // フェード残りがあれば 1 サンプル分だけ target に近づける。
@@ -137,18 +150,24 @@ final class DroneGenerator {
                     amplitude = target
                 }
 
-                let sample = Float(sin(phase)) * amplitude
-                phase += phaseIncrement
-                if phase >= twoPi {
-                    phase -= twoPi
-                }
-                for buffer in ablPointer {
-                    let bufferPointer = UnsafeMutableBufferPointer<Float>(buffer)
-                    bufferPointer[frame] = sample
+                let sampleL = Float(sin(phaseLeft)) * amplitude
+                let sampleR = Float(sin(phaseRight)) * amplitude
+
+                phaseLeft += phaseIncrementLeft
+                if phaseLeft >= twoPi { phaseLeft -= twoPi }
+                phaseRight += phaseIncrementRight
+                if phaseRight >= twoPi { phaseRight -= twoPi }
+
+                if isStereo {
+                    bufferL[frame] = sampleL
+                    bufferR[frame] = sampleR
+                } else {
+                    bufferL[frame] = (sampleL + sampleR) * 0.5
                 }
             }
 
-            state.phase = phase
+            state.phaseLeft = phaseLeft
+            state.phaseRight = phaseRight
             state.currentAmplitude = amplitude
             state.activeFadeFramesRemaining = framesRemaining
             return noErr

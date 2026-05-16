@@ -15,8 +15,9 @@ import Atomics
 ///
 /// 1. **Audio thread 単一所有**
 ///    - fade: `currentAmplitude`, `activeTargetAmplitude`, `activeFadeFramesRemaining`, `lastConsumedGeneration`
-///    - PRNG: `prngState`（xorshift32 の state）
-///    - Paul Kellet's pink filter state: `b0` 〜 `b6`
+///    - PRNG（L/R 独立）: `prngStateLeft`, `prngStateRight`（xorshift32 の state）
+///    - Paul Kellet's pink filter state（L/R 独立）: `b0L`..`b6L`, `b0R`..`b6R`
+///    - L/R 独立 PRNG により、左右で相関ゼロの真ステレオピンクノイズを生成する。
 ///
 /// 2. **Main writer / Audio reader（pending command）** — 全 atomic
 ///    - `pendingTargetAmplitudeBits` / `pendingFadeFrames` / `pendingGeneration`
@@ -60,21 +61,33 @@ final class NoiseRenderState {
     /// 最後に consume した `pendingGeneration` の値（odd/even seqlock）。
     var lastConsumedGeneration: Int = 0
 
-    // MARK: - Audio thread 単一所有 — PRNG (xorshift32)
+    // MARK: - Audio thread 単一所有 — PRNG (xorshift32, L/R 独立)
 
-    /// xorshift32 の state。0 以外で初期化する必要がある。
-    /// `0xCAFEBABE` を seed として採用（出典: 慣用的なマジックナンバー、特に深い意味は無い）。
-    var prngState: UInt32 = 0xCAFEBABE
+    /// L チャネル用 xorshift32 state。0 以外で初期化。
+    /// 独立 PRNG により L/R のノイズが相関ゼロになり、stereo の空間感が出る。
+    var prngStateLeft: UInt32 = 0xCAFEBABE
 
-    // MARK: - Audio thread 単一所有 — Paul Kellet's pink filter state
+    /// R チャネル用 xorshift32 state。L と別の seed を採用。
+    /// `0xDEADBEEF` は慣用的なマジックナンバー（特に深い意味は無い）。
+    var prngStateRight: UInt32 = 0xDEADBEEF
 
-    var b0: Float = 0.0
-    var b1: Float = 0.0
-    var b2: Float = 0.0
-    var b3: Float = 0.0
-    var b4: Float = 0.0
-    var b5: Float = 0.0
-    var b6: Float = 0.0
+    // MARK: - Audio thread 単一所有 — Paul Kellet's pink filter state (L/R 独立)
+
+    var b0L: Float = 0.0
+    var b1L: Float = 0.0
+    var b2L: Float = 0.0
+    var b3L: Float = 0.0
+    var b4L: Float = 0.0
+    var b5L: Float = 0.0
+    var b6L: Float = 0.0
+
+    var b0R: Float = 0.0
+    var b1R: Float = 0.0
+    var b2R: Float = 0.0
+    var b3R: Float = 0.0
+    var b4R: Float = 0.0
+    var b5R: Float = 0.0
+    var b6R: Float = 0.0
 
     // MARK: - Main writer / Audio reader（pending command, 全 atomic）
 

@@ -5,8 +5,9 @@ import os
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
 /// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
-/// （基音 + 完全 5度 + オクターブ、純正律比）と `NoiseGenerator`（ピンクノイズ）に委譲し、
-/// `mainMixerNode` で並列ミックスする。音声ファイル・録音素材・ループ素材は一切使わない。
+/// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune）と
+/// `NoiseGenerator`（ピンクノイズ、L/R 独立 PRNG）に委譲し、`mainMixerNode` で並列ミックスする。
+/// 出力フォーマットは 2ch stereo（Task 10 から）。音声ファイル・録音素材・ループ素材は一切使わない。
 ///
 /// ## 想定する呼び出しスレッド
 /// クラス全体を `@MainActor` で隔離し、`start()` / `stop()` / `setVolume(_:)` を含む
@@ -28,7 +29,8 @@ import os
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
 /// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sleep-mix.wav に書き出す。
-/// WAV には Drone 3 声（220 / 330 / 440 Hz）+ Noise（ピンクノイズ）が mixer でミックスされた状態が記録される。
+/// WAV には Drone 3 声（220 / 330 / 440 Hz、L/R 微小 detune）+ Noise（ピンクノイズ、L/R 独立）が
+/// mixer でミックスされた 2ch stereo として記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
@@ -120,13 +122,14 @@ final class AudioEngineController {
         }
         self.mode = resolvedMode
 
-        // 1ch / 44.1kHz / Float32 標準フォーマット。標準パラメータなので
-        // 実用上 nil にならないが、念のため fatalError でガード。
+        // 2ch (stereo) / 44.1kHz / Float32 標準フォーマット。
+        // Task 10 で stereo 化: 各 Drone は L/R で detune したサイン波、Noise は L/R 独立 PRNG。
+        // 標準パラメータなので実用上 nil にならないが、念のため fatalError でガード。
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
-            channels: 1
+            channels: 2
         ) else {
-            fatalError("AVAudioFormat(standardFormatWithSampleRate: \(renderSampleRate), channels: 1) returned nil")
+            fatalError("AVAudioFormat(standardFormatWithSampleRate: \(renderSampleRate), channels: 2) returned nil")
         }
 
         // Generator を先に作る（engine の rendering mode とは独立に source node を構築できる）。
@@ -349,7 +352,7 @@ final class AudioEngineController {
         let fileSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: renderSampleRate,
-            AVNumberOfChannelsKey: 1,
+            AVNumberOfChannelsKey: 2, // stereo (L/R 独立)
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
