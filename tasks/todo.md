@@ -51,7 +51,18 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Codemagic 用 `codemagic.yaml` 作成（ビルド → シミュレータ起動 → 録画+SS → アーティファクト）
 - [x] Codemagic から自動再生させるため、`MainView` に `CI_AUTOSTART` 環境変数フックを追加
 - [x] Codex に codemagic.yaml と CI_AUTOSTART 変更をレビュー依頼 → 指摘（録画音声検証 / trap 失敗時 flush / シミュレータ選択決定性 / `--console-pty`）を反映
-- [ ] **ユーザー側作業**: Codemagic（codemagic.io）にサインアップ → GitHub リポジトリ `BitRat009/hypnoctone-engine-ios` を接続 → 初回 build をトリガー（push or 手動）
-- [ ] 初回 build 結果を確認: `preview.mp4`（音声含むか）/ `01-launch.png` `02-playing.png` `03-still-playing.png` / `app-stdout.log` をアーティファクトからダウンロードして UI と 440Hz サイン波を確認
-- [ ] 音声が mp4 に乗らなかった場合の代替案検討（例: アプリ側で短い WAV を生成・保存し artifacts に上げる）
+- [x] **ユーザー側作業**: Codemagic（codemagic.io）にサインアップ → GitHub リポジトリ `BitRat009/hypnoctone-engine-ios` を接続 → 初回 build をトリガー
+- [x] 初回 build 結果確認 → **真っ白画面（ステータスバーのみ）& 音声無し** という結果
+      - ffprobe で `nb_streams=1` を確認、`simctl recordVideo` は音声を録らない仕様と確定
+      - スクリーンショット 3 枚すべて同一バイト数 = 16 秒間ずっと静止
+      - app-stdout.log は PID 行のみで原因不明
+- [x] **codemagic.yaml v2 作成** — 真っ白の根本原因切り分け用に診断を強化
+      - `simctl spawn log stream` で SpringBoard / runningboardd / launchd / ReportCrash を含む system log を保存
+      - `launchctl list` でアプリ pid 生存を経過時刻ごとに probe.log へ記録
+      - sleep を 3s/7s/12s/16s に拡大（iOS 18 cold start 待ち、4 枚撮影）
+      - 実行開始時刻以降の crash log を DiagnosticReports + CoreSimulator から広めに収集
+      - Codex レビュー反映: awk の PID 数値判定 / index() による文字列包含 / predicate 拡張 / crash log 範囲拡大
+- [ ] v2 を push → Codemagic で実走 → artifacts_002 を回収して真っ白原因を特定
+- [ ] 原因に応じて修正（cold start 遅延 → さらに sleep / クラッシュ → コード修正）
+- [ ] 音声検証は別途: AudioEngineController に offline render で短い WAV を吐く開発専用フックを追加し、CI_AUTOSTART 時に artifacts へ書き出す（v3）
 - [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信

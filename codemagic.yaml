@@ -89,47 +89,78 @@ workflows:
           echo "Installing: $APP_PATH"
           xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
 
-      - name: Capture video + screenshots
+      - name: Capture video + screenshots (diagnostic v2)
         script: |
           set -euo pipefail
           mkdir -p "$ARTIFACTS_DIR"
 
-          # 録画開始（音声も同一 mp4 に含まれることを期待。後段で ffprobe 検査）
+          # ---- 実行開始時刻マーカー（crash log を実行以降に絞るため） ----
+          touch -t "$(date '+%Y%m%d%H%M.%S')" "$ARTIFACTS_DIR/.start-marker"
+
+          # ---- system log を最初から拾う（真っ白原因の切り分け用） ----
+          # アプリ本体に加え、起動失敗・watchdog・foreground 化失敗を見るため
+          # SpringBoard / runningboardd / launchd / ReportCrash も拾う。
+          xcrun simctl spawn "$DEVICE_UDID" log stream \
+            --level=debug \
+            --predicate 'processImagePath CONTAINS "HypnoctoneEngine" OR senderImagePath CONTAINS "HypnoctoneEngine" OR subsystem == "com.hypnoctone.HypnoctoneEngine" OR eventMessage CONTAINS "HypnoctoneEngine" OR process == "SpringBoard" OR process == "runningboardd" OR process == "launchd" OR process == "ReportCrash"' \
+            > "$ARTIFACTS_DIR/syslog.log" 2>&1 &
+          LOG_PID=$!
+
+          # ---- 録画開始（v1 で音声が記録されないことを実証済み、UI 確認用） ----
           xcrun simctl io "$DEVICE_UDID" recordVideo --codec=h264 "$ARTIFACTS_DIR/preview.mp4" &
           REC_PID=$!
 
-          # 失敗時にも録画を確実に flush する。途中で screenshot 等が失敗しても
-          # ファイルが 0 バイトのまま終わらないようにする。
+          # 失敗時にも録画・ログを確実に flush。
           cleanup() {
             xcrun simctl terminate "$DEVICE_UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
             if kill -0 "$REC_PID" >/dev/null 2>&1; then
               kill -SIGINT "$REC_PID" >/dev/null 2>&1 || true
               wait "$REC_PID" >/dev/null 2>&1 || true
             fi
+            if kill -0 "$LOG_PID" >/dev/null 2>&1; then
+              kill -SIGTERM "$LOG_PID" >/dev/null 2>&1 || true
+              wait "$LOG_PID" >/dev/null 2>&1 || true
+            fi
           }
           trap cleanup EXIT
 
-          # 録画プロセスが SIGINT を受け取れるよう少し待つ
-          sleep 1
+          # 録画・ログプロセスが立ち上がるのを待つ
+          sleep 2
 
           # アプリ起動。SIMCTL_CHILD_ プレフィックスは simctl が剥がして子プロセスに環境変数として渡す。
-          # MainView.handleCIAutostart() がこれを見て自動再生を開始する。
           SIMCTL_CHILD_CI_AUTOSTART=1 \
             xcrun simctl launch --console "$DEVICE_UDID" "$BUNDLE_ID" \
             > "$ARTIFACTS_DIR/app-stdout.log" 2>&1 &
           LAUNCH_PID=$!
 
-          # 1) 起動直後（自動再生はまだ走らない遅延中）
-          sleep 1
+          # 描画ログ用ヘルパ: 「経過秒 / アプリ pid 生存？」
+          # launchctl list は `PID Status Label` 形式。終了済みは PID が `-` になるので
+          # PID が数値であることを保証してから取る。bundle id を regex でなく
+          # 文字列包含で比較（`.` を任意文字扱いしない）。
+          probe_app() {
+            local label="$1"
+            local pid
+            pid=$(xcrun simctl spawn "$DEVICE_UDID" launchctl list 2>/dev/null | \
+              awk -v b="$BUNDLE_ID" '$1 ~ /^[0-9]+$/ && index($3, b) > 0 {print $1; exit}')
+            echo "[probe $label] app pid: ${pid:-<not running>}" | tee -a "$ARTIFACTS_DIR/probe.log"
+          }
+
+          # v1 では sleep 1 で真っ白だったので、iOS 18 cold start を見越して長めに伸ばす。
+          sleep 3
+          probe_app "t+3s"
           xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/01-launch.png"
 
-          # 2) 自動再生開始後（handleCIAutostart の 1.5s 遅延が明けた頃）
-          sleep 3
-          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/02-playing.png"
-
-          # 3) 数秒継続再生したあと（PulseView のアニメーション差分を見る）
           sleep 4
-          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/03-still-playing.png"
+          probe_app "t+7s"
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/02-after-autostart.png"
+
+          sleep 5
+          probe_app "t+12s"
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/03-playing.png"
+
+          sleep 4
+          probe_app "t+16s"
+          xcrun simctl io "$DEVICE_UDID" screenshot "$ARTIFACTS_DIR/04-late.png"
 
           # 明示停止（trap でも回収されるが二重 kill は安全）
           xcrun simctl terminate "$DEVICE_UDID" "$BUNDLE_ID" || true
@@ -137,8 +168,39 @@ workflows:
           kill -SIGINT "$REC_PID" || true
           wait "$REC_PID" || true
           wait "$LAUNCH_PID" || true
+          kill -SIGTERM "$LOG_PID" || true
+          wait "$LOG_PID" || true
+
+          # crash log 収集（範囲を広げて取り逃がしを減らす）
+          mkdir -p "$ARTIFACTS_DIR/crash"
+
+          # 1) simulator 内の SIMULATOR_SHARED_RESOURCES_DIRECTORY 配下
+          CRASH_DIR=$(xcrun simctl getenv "$DEVICE_UDID" SIMULATOR_SHARED_RESOURCES_DIRECTORY 2>/dev/null || true)
+          if [ -n "$CRASH_DIR" ] && [ -d "$CRASH_DIR/Library/Logs/CrashReporter" ]; then
+            cp -R "$CRASH_DIR/Library/Logs/CrashReporter"/* "$ARTIFACTS_DIR/crash/" 2>/dev/null || true
+          fi
+
+          # 2) ホスト側 DiagnosticReports — 実行開始時刻以降の .ips / .crash 全部
+          #    （HypnoctoneEngine 以外に SpringBoard/ReportCrash 等の関連も拾うため広めに）
+          if [ -d "$HOME/Library/Logs/DiagnosticReports" ]; then
+            find "$HOME/Library/Logs/DiagnosticReports" -type f \
+              \( -name "*.ips" -o -name "*.crash" \) \
+              -newer "$ARTIFACTS_DIR/.start-marker" \
+              -exec cp {} "$ARTIFACTS_DIR/crash/" \; 2>/dev/null || true
+          fi
+
+          # 3) CoreSimulator の per-device ログ（起動失敗・foreground 化失敗の手がかり）
+          if [ -d "$HOME/Library/Logs/CoreSimulator/$DEVICE_UDID" ]; then
+            mkdir -p "$ARTIFACTS_DIR/crash/coresim"
+            cp -R "$HOME/Library/Logs/CoreSimulator/$DEVICE_UDID/"* \
+              "$ARTIFACTS_DIR/crash/coresim/" 2>/dev/null || true
+          fi
 
           ls -la "$ARTIFACTS_DIR"
+          echo "--- probe.log ---"
+          cat "$ARTIFACTS_DIR/probe.log" || true
+          echo "--- syslog head ---"
+          head -200 "$ARTIFACTS_DIR/syslog.log" || true
 
       - name: Verify capture (audio stream check)
         script: |
@@ -172,4 +234,5 @@ workflows:
       - artifacts/*.mp4
       - artifacts/*.png
       - artifacts/*.log
+      - artifacts/crash/**/*
       - build/Logs/**/*.log

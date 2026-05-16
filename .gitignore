@@ -39,3 +39,6 @@ Carthage/Build/
 *.env
 .env.local
 secrets/
+
+# Codemagic からダウンロードしたアーティファクトを保管するローカル作業領域
+Codemagic/
