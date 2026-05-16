@@ -137,11 +137,16 @@ workflows:
           # launchctl list は `PID Status Label` 形式。終了済みは PID が `-` になるので
           # PID が数値であることを保証してから取る。bundle id を regex でなく
           # 文字列包含で比較（`.` を任意文字扱いしない）。
+          #
+          # 注: `set -e + pipefail` 下では `awk '...exit}'` の early-exit で
+          # `launchctl list` が SIGPIPE(141) を受け、script 全体が落ちる事例があった
+          # （v7 ラン）。pipe 全体を `|| pid=""` で吸収して防御する。
           probe_app() {
             local label="$1"
             local pid
-            pid=$(xcrun simctl spawn "$DEVICE_UDID" launchctl list 2>/dev/null | \
-              awk -v b="$BUNDLE_ID" '$1 ~ /^[0-9]+$/ && index($3, b) > 0 {print $1; exit}')
+            pid=$(xcrun simctl spawn "$DEVICE_UDID" launchctl list 2>/dev/null \
+              | awk -v b="$BUNDLE_ID" '$1 ~ /^[0-9]+$/ && index($3, b) > 0 {print $1; exit}') \
+              || pid=""
             echo "[probe $label] app pid: ${pid:-<not running>}" | tee -a "$ARTIFACTS_DIR/probe.log"
           }
 
