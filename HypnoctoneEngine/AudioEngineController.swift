@@ -6,14 +6,27 @@ import os
 /// `AVAudioEngine` と `AVAudioSourceNode` を保持し、440Hz のサイン波を
 /// リアルタイム生成する。音声ファイル・録音素材・ループ素材は一切使わない。
 ///
-/// 想定する呼び出しスレッド: `start()` / `stop()` / `setVolume(_:)` はメインスレッド
-/// （`AudioViewModel` 経由）から呼ぶ。render block のみオーディオスレッドで動く。
+/// ## 想定する呼び出しスレッド
+/// クラス全体を `@MainActor` で隔離し、`start()` / `stop()` / `setVolume(_:)` を含む
+/// 全 public/internal メソッドはメインスレッドからのみ呼ぶ。render block のみ
+/// オーディオスレッドで動くが、render block 内では `ToneRenderState` の値を
+/// 直接読み書きするだけで本クラスのメソッドは呼ばない。
 ///
-/// CI モード（環境変数 `CI_AUTOSTART` が設定されている場合）では、CoreAudio HAL
-/// に依存しない `enableManualRenderingMode(.offline)` を使い、`start()` が
-/// 3 秒分のサイン波を Documents/sine-440hz.wav に書き出す。これは Codemagic 等の
-/// headless mac mini で AVAudioEngine がリアルタイム出力できないため
-/// （Initialize: RPC timeout で SIGABRT する）。
+/// ## フェード（Task 5）
+/// `start()` で 0.8 秒の fade-in、`stop()` で 0.8 秒の fade-out を行う。
+/// サンプル単位の線形補間を `ToneRenderState` の `currentAmplitude` に対して
+/// render block 内で行う。`stop()` は fade-out 完了まで待ってから engine を止めるため
+/// 内部で `Task { @MainActor in ... }` を起動し、`Task.sleep(0.8s)` 後に engine.stop()。
+/// fade-out 中に `start()` が呼ばれた場合は保留中の停止タスクを取り消す。
+/// Stop 連打時のレース対策として世代番号（`stopGeneration`）で識別する。
+///
+/// ## CI モード
+/// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
+/// `enableManualRenderingMode(.offline)` を使い、`start()` が
+/// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sine-440hz.wav に書き出す。
+/// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
+/// （Initialize: RPC timeout で SIGABRT する）対策。
+@MainActor
 final class AudioEngineController {
 
     // MARK: - 動作モード
@@ -28,7 +41,8 @@ final class AudioEngineController {
 
     // MARK: - 公開状態
 
-    /// エンジンが動作中かどうか。メインスレッドからのみ参照する。
+    /// エンジンが動作中かどうか。
+    /// fade-out 中は `true` のままで、engine.stop() 完了後に `false` になる。
     private(set) var isRunning = false
 
     /// 現在の動作モード。
@@ -46,6 +60,13 @@ final class AudioEngineController {
     /// 可能性があるため何もせず return する（fail-closed）。
     private var manualRenderingActive = false
 
+    /// fade-out 完了を待ってから engine を止めるための保留タスク。
+    private var pendingStopTask: Task<Void, Never>?
+
+    /// Stop 連打時のレース解消用世代番号。
+    /// `stop()` を呼ぶたびにインクリメントし、Task は自分の世代がまだ最新かを確認してから finalize する。
+    private var stopGeneration: Int = 0
+
     private let logger = Logger(
         subsystem: "com.hypnoctone.HypnoctoneEngine",
         category: "AudioEngineController"
@@ -61,8 +82,15 @@ final class AudioEngineController {
     /// offline モードで一度に render するフレーム数。
     private let offlineMaxFrames: AVAudioFrameCount = 4_096
 
-    /// offline モードで render する総秒数。
-    private let offlineRenderSeconds: Double = 3.0
+    /// offline モードで render する総秒数（fade-in + 定常 + fade-out）。
+    /// fade-in 0.8s + 定常 2.4s + fade-out 0.8s = 4.0s。
+    private let offlineRenderSeconds: Double = 4.0
+
+    /// fade-in の所要秒数。
+    private let fadeInSeconds: Double = 0.8
+
+    /// fade-out の所要秒数。
+    private let fadeOutSeconds: Double = 0.8
 
     // MARK: - 初期化
 
@@ -104,7 +132,6 @@ final class AudioEngineController {
                 manualRenderingActive = false
                 logger.error("manual rendering mode の有効化に失敗: \(error.localizedDescription, privacy: .public)")
                 // fail-closed: 有効化失敗時はオーディオグラフ構築も engine.start() も行わない。
-                // ここで return することで、その後の startOfflineRender() でも guard により短絡する。
                 return
             }
         }
@@ -114,11 +141,9 @@ final class AudioEngineController {
 
     // MARK: - 再生制御
 
-    /// 再生（または offline render）を開始する。
-    /// すでに動作中の場合は何もしない。
+    /// 再生を開始する（realtime: fade-in 開始、offline: fadeIn→定常→fadeOut の WAV を書く）。
+    /// fade-out 中に呼ばれた場合は保留中の停止タスクを取り消し、現在地点から fade-in に切り替える。
     func start() {
-        guard !isRunning else { return }
-
         switch mode {
         case .realtime:
             startRealtime()
@@ -127,30 +152,45 @@ final class AudioEngineController {
         }
     }
 
-    /// エンジンを停止する。
-    /// 停止してもオーディオグラフは破棄しないため、再度 `start()` で再生を再開できる。
+    /// 再生を停止する（fade-out → engine.stop() → AVAudioSession 無効化）。
+    /// 同期的に戻るが、実際の停止は約 `fadeOutSeconds` 秒後に完了する。
+    /// fade-out 中に `start()` が呼ばれたら停止はキャンセルされる。
     func stop() {
         guard isRunning else { return }
+        // offline は自己完結ライフサイクル。外部からの stop は無視。
+        guard mode == .realtime else { return }
 
-        engine.stop()
-        isRunning = false
-        logger.info("AVAudioEngine を停止しました。")
+        // 既存の保留停止を取り消して、最新の stop を採用する。
+        pendingStopTask?.cancel()
+        // 世代番号を更新し、この stop に対応する Task だけが finalize できるようにする。
+        stopGeneration &+= 1
+        let myGeneration = stopGeneration
 
-        if mode == .realtime {
+        scheduleFadeOut()
+
+        pendingStopTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
             do {
-                try AVAudioSession.sharedInstance().setActive(
-                    false,
-                    options: [.notifyOthersOnDeactivation]
-                )
+                try await Task.sleep(nanoseconds: UInt64(self.fadeOutSeconds * 1_000_000_000))
             } catch {
-                logger.error("AVAudioSession の無効化に失敗: \(error.localizedDescription, privacy: .public)")
+                // Task が cancel された = 再 start or 新しい stop が走った。finalize しない。
+                return
             }
+            // 自分が「最新の stop」でないなら finalize しない（連打レース対策）。
+            guard myGeneration == self.stopGeneration else {
+                self.logger.info("stop generation 不一致。finalize をスキップ (mine=\(myGeneration), latest=\(self.stopGeneration))。")
+                return
+            }
+            // さらに二重チェック: 再 start で target が 0 でなくなっていれば finalize しない。
+            if self.renderState.targetAmplitude > 0.0 {
+                self.logger.info("fade-out 中に再 start を検知 (target>0)。engine.stop() をスキップ。")
+                return
+            }
+            self.finalizeRealtimeStop()
         }
     }
 
     /// マスター音量を設定する。
-    ///
-    /// `AudioViewModel`（`@MainActor`）経由でメインスレッドから呼ばれる想定。
     /// `mainMixerNode.outputVolume` への代入はフレームワーク側で滑らかに補間されるため、
     /// 値を急に変えてもクリックノイズが出にくい。
     /// - Parameter value: 音量（0.0〜1.0）。範囲外の値はクランプする。
@@ -161,32 +201,76 @@ final class AudioEngineController {
 
     // MARK: - realtime 起動
 
-    /// `AVAudioSession` を有効化し、エンジンを realtime で開始する。
+    /// `AVAudioSession` を有効化し、エンジンを realtime で開始し、fade-in を仕掛ける。
+    /// 既に動作中（fade-out 中含む）なら保留 stop を取り消して fade-in を再仕掛けるだけ。
     private func startRealtime() {
-        guard configureAudioSession() else { return }
+        // fade-out 中の再 start を受け取れるよう、保留 stop を取り消す。
+        pendingStopTask?.cancel()
+        pendingStopTask = nil
+
+        if !isRunning {
+            guard configureAudioSession() else { return }
+            do {
+                try engine.start()
+                isRunning = true
+                logger.info("AVAudioEngine を realtime で開始しました。")
+            } catch {
+                isRunning = false
+                logger.error("AVAudioEngine の開始に失敗: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+        } else {
+            logger.info("既に再生中 / fade-out 中。fade-in に切り替えます。")
+        }
+
+        scheduleFadeIn()
+    }
+
+    /// fade-out 完了後の engine 停止と session 無効化。
+    /// `@MainActor` 隔離下で呼ばれるため、AVAudioEngine / AVAudioSession の API は安全。
+    private func finalizeRealtimeStop() {
+        engine.stop()
+        isRunning = false
+        logger.info("fade-out 完了、AVAudioEngine を停止しました。")
 
         do {
-            try engine.start()
-            isRunning = true
-            logger.info("AVAudioEngine を realtime で開始しました。")
+            try AVAudioSession.sharedInstance().setActive(
+                false,
+                options: [.notifyOthersOnDeactivation]
+            )
         } catch {
-            isRunning = false
-            logger.error("AVAudioEngine の開始に失敗: \(error.localizedDescription, privacy: .public)")
+            logger.error("AVAudioSession の無効化に失敗: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    // MARK: - フェードスケジュール
+
+    /// fade-in をスケジュールする（現在の振幅から `defaultAmplitude` まで線形に上昇）。
+    /// render thread は `fadeFramesRemaining` フレームで `targetAmplitude` へ近づけて行く。
+    /// メインスレッドは render state の現在値（`currentAmplitude` 等）を読まない設計。
+    private func scheduleFadeIn() {
+        renderState.targetAmplitude = renderState.defaultAmplitude
+        renderState.fadeFramesRemaining = max(1, Int(renderSampleRate * fadeInSeconds))
+        logger.info("fade-in 開始: target=\(self.renderState.defaultAmplitude, privacy: .public) frames=\(self.renderState.fadeFramesRemaining)")
+    }
+
+    /// fade-out をスケジュールする（現在の振幅から 0 まで線形に下降）。
+    private func scheduleFadeOut() {
+        renderState.targetAmplitude = 0.0
+        renderState.fadeFramesRemaining = max(1, Int(renderSampleRate * fadeOutSeconds))
+        logger.info("fade-out 開始: target=0 frames=\(self.renderState.fadeFramesRemaining)")
     }
 
     // MARK: - offline render
 
-    /// engine を manual rendering で start し、Documents/sine-440hz.wav に書き出す。
+    /// engine を manual rendering で start し、fade-in → 定常 → fade-out の WAV を書き出す。
     /// AVAudioSession は触らない（CoreAudio HAL を回避するため）。
     private func startOfflineRender() {
-        // fail-closed: manual rendering が有効化されていない状態で engine.start() を呼ぶと
-        // CoreAudio HAL を触りに行き、Codemagic のような headless mac では SIGABRT する。
         guard manualRenderingActive else {
             logger.error("manual rendering が有効化されていないため offline render を中止します。")
             return
         }
-        guard let format = sourceFormat else {
+        guard sourceFormat != nil else {
             logger.error("sourceFormat が無いため offline render を中止します。")
             return
         }
@@ -205,6 +289,9 @@ final class AudioEngineController {
             isRunning = false
             logger.info("offline render が完了しました。")
         }
+
+        // 0 秒地点で fade-in を仕掛ける。
+        scheduleFadeIn()
 
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         guard let outputURL = documentsURL?.appendingPathComponent("sine-440hz.wav") else {
@@ -244,16 +331,26 @@ final class AudioEngineController {
             return
         }
 
-        let totalFrames = AVAudioFrameCount(renderSampleRate * offlineRenderSeconds)
+        // fade-out 開始地点（総尺 - fade-out 秒数）。
+        // render block 内のスナップショット遅延（最大 frameCapacity フレーム）を吸収するため、
+        // 総フレーム数に余裕（+ frameCapacity）を足して fade-out が確実に 0 へ到達するようにする。
+        let baseTotalFrames = AVAudioFrameCount(renderSampleRate * offlineRenderSeconds)
+        let totalFrames = baseTotalFrames + buffer.frameCapacity
+        let fadeOutStartFrame = AVAudioFrameCount(renderSampleRate * (offlineRenderSeconds - fadeOutSeconds))
         var rendered: AVAudioFrameCount = 0
-        // `.cannotDoInCurrentContext` は一過性のステータスなので一定回数まで retry を許す。
+        var fadeOutScheduled = false
         var transientRetries = 0
         let maxTransientRetries = 32
-        // `.success` で frameLength == 0 が続くと無限ループするので連続 0 回数も上限を設ける。
         var zeroFrameRetries = 0
         let maxZeroFrameRetries = 8
 
         while rendered < totalFrames {
+            // fade-out 開始地点を越えたら一度だけ scheduleFadeOut。
+            if !fadeOutScheduled && rendered >= fadeOutStartFrame {
+                scheduleFadeOut()
+                fadeOutScheduled = true
+            }
+
             let remaining = totalFrames - rendered
             let toRender = min(buffer.frameCapacity, remaining)
             do {
@@ -293,7 +390,6 @@ final class AudioEngineController {
                 logger.error("renderOffline / write 失敗: \(error.localizedDescription, privacy: .public)")
                 return
             }
-            _ = format
         }
 
         logger.info("WAV を書き出しました: \(outputURL.path, privacy: .public) (frames: \(rendered))")
@@ -313,8 +409,6 @@ final class AudioEngineController {
         self.sourceNode = node
 
         engine.attach(node)
-        // `mainMixerNode` へアクセスすると outputNode への接続が自動生成される。
-        // manual rendering mode が有効ならハードウェアではなく manual output に向く。
         engine.connect(node, to: engine.mainMixerNode, format: format)
         engine.mainMixerNode.outputVolume = defaultVolume
         engine.prepare()
@@ -325,23 +419,42 @@ final class AudioEngineController {
     /// render block 内ではアロケーション・ロック・I/O・UI 更新を行わない。
     /// `renderState` を強参照でキャプチャするが、`renderState` は他オブジェクトを
     /// 参照しないため循環参照は発生しない（`self` はキャプチャしない）。
+    ///
+    /// ## 振幅補間（fade）
+    /// メインスレッドは `targetAmplitude` と `fadeFramesRemaining` だけを書き換える。
+    /// render thread はサンプル単位に `(target - current) / framesRemaining` で increment を
+    /// 計算し、`current` を `target` へ近づける。`framesRemaining` を 1 ずつ減らし、0 で
+    /// 補間を止めて `target` に張り付く。これにより 1 ブロック中の target 変更にも自然に追従し、
+    /// 累積誤差で target を越えることもない。
     private func makeSourceNode(format: AVAudioFormat) -> AVAudioSourceNode {
         let state = renderState
 
         return AVAudioSourceNode(format: format) { isSilence, _, frameCount, audioBufferList -> OSStatus in
-            // 無音ではなく実際に信号を生成していることを明示する。
             isSilence.pointee = false
 
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
 
-            let amplitude = state.amplitude
-            let increment = state.phaseIncrement
+            let phaseIncrement = state.phaseIncrement
             let twoPi = state.twoPi
             var phase = state.phase
 
+            // ブロック先頭で fade 状態をスナップショット。
+            var amplitude = state.currentAmplitude
+            let target = state.targetAmplitude
+            var framesRemaining = state.fadeFramesRemaining
+
             for frame in 0..<Int(frameCount) {
+                // フェード残りがあれば 1 サンプル分だけ target に近づける。
+                if framesRemaining > 0 {
+                    let step = (target - amplitude) / Float(framesRemaining)
+                    amplitude += step
+                    framesRemaining -= 1
+                } else {
+                    amplitude = target
+                }
+
                 let sample = Float(sin(phase)) * amplitude
-                phase += increment
+                phase += phaseIncrement
                 if phase >= twoPi {
                     phase -= twoPi
                 }
@@ -352,6 +465,8 @@ final class AudioEngineController {
             }
 
             state.phase = phase
+            state.currentAmplitude = amplitude
+            state.fadeFramesRemaining = framesRemaining
             return noErr
         }
     }

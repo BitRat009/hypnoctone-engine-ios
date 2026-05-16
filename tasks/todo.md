@@ -79,4 +79,16 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - スクリーンショットで Hypnoctone の UI（暗背景・ヘッダ・PulseView・Start/Stop ボタン）が描画される
       - `sine-440hz.wav` を DL して 440Hz サイン波を実聴
 - [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信
-- [ ] 実機確認が必要になったら: Apple Developer Program + TestFlight 経由で自分の iPhone に配信
+
+## Task 5 — フェードイン / フェードアウト
+
+- [x] Phase 1: ToneRenderState に fade 用プロパティ (`currentAmplitude` / `targetAmplitude` / `fadeFramesRemaining`) を追加
+- [x] Phase 2: render block を補間付きに修正（メインから currentAmplitude を読まない構造、Codex 指摘 3 反映）
+- [x] Phase 3: AudioEngineController を `@MainActor` 化、`stop()` を Task で fade-out 完了後に finalize（Codex 指摘 1 反映）
+      - Stop 連打レース対策で `stopGeneration` 世代番号を導入（Codex 指摘 2 反映）
+- [x] Phase 4: AudioViewModel.isPlaying を「ユーザー意図」、controller.isRunning を「engine 稼働」に分離
+- [x] Phase 5: offline render を fadeIn → 定常 → fadeOut の 3 段に。総フレーム +bufferCapacity の余裕で fade-out 確実完了（Codex 指摘 4 反映）
+- [x] Phase 6: codemagic.yaml の duration 検証を >= 3.5s に
+- [x] Phase 7: Codex レビュー → 指摘 (1)(2)(3)(4) を反映
+- [ ] Task 5 push → Codemagic 実走 → artifacts_004 で fade 形状を波形ビューアで確認、実機で click 音が出ないか実聴
+- [ ] 後続課題 (Codex 指摘 5): `controller.start()` を Bool 返却にして AudioViewModel が失敗時に isPlaying をロールバックする整合性改善（Task 5 のスコープ外）
