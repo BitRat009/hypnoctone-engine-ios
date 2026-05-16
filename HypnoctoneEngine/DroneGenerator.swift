@@ -8,7 +8,8 @@ import os
 /// detune によるゆるいビート（基音 220Hz / detune 2cent で約 4 秒周期）が
 /// 「広がり感」を、`lfoDepthCents` > 0 のときは LFO（pitch vibrato）が
 /// 周期数十秒の超低周波で「揺らぎ感」を、`harmonics` が空でない場合は倍音が
-/// 「楽器的な温かみ」を与え、Sleep 用途で疲れない音場を作る。
+/// 「楽器的な温かみ」を、`envelopeDepth` > 0 のときは超低周波（30〜60s）の
+/// envelope LFO が全体音量を呼吸させて「呼吸感」を与え、Sleep 用途で疲れない音場を作る。
 /// `AudioEngineController` がこの Generator を保持し、`AVAudioEngine` に attach する。
 ///
 /// ## スレッドモデル
@@ -67,6 +68,9 @@ final class DroneGenerator {
     ///   - lfoInitialPhase: LFO 初期位相（ラジアン）。複数声で位相をずらすと揺れが揃わない。
     ///   - harmonics: 基音に加算する倍音群。例えば `[(2.0, 0.2), (3.0, 0.1)]` で
     ///     第 2 倍音 (基音の 20%) と第 3 倍音 (10%) を混ぜる。空配列で純サイン波。
+    ///   - envelopePeriodSeconds: Envelope LFO 周期（秒）。0 で無効。Sleep 用途では 30〜60 秒。
+    ///   - envelopeDepth: Envelope LFO 深さ。0.075 で出力 0.925〜1.075 範囲。0 で無効。
+    ///   - envelopeInitialPhase: Envelope LFO 初期位相。複数 generator で揃えると同期呼吸。
     ///   - defaultAmplitude: 定常時の振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         format: AVAudioFormat,
@@ -76,6 +80,9 @@ final class DroneGenerator {
         lfoDepthCents: Double = 0.0,
         lfoInitialPhase: Double = 0.0,
         harmonics: [(ratio: Double, amplitudeFactor: Float)] = [],
+        envelopePeriodSeconds: Double = 0.0,
+        envelopeDepth: Float = 0.0,
+        envelopeInitialPhase: Double = 0.0,
         defaultAmplitude: Float = 0.2
     ) {
         self.sourceFormat = format
@@ -89,6 +96,9 @@ final class DroneGenerator {
             lfoDepthCents: lfoDepthCents,
             lfoInitialPhase: lfoInitialPhase,
             harmonics: harmonics,
+            envelopePeriodSeconds: envelopePeriodSeconds,
+            envelopeDepth: envelopeDepth,
+            envelopeInitialPhase: envelopeInitialPhase,
             defaultAmplitude: defaultAmplitude
         )
 
@@ -160,6 +170,21 @@ final class DroneGenerator {
                 lfoMod = 1.0
             }
 
+            // ---- ブロック先頭で Envelope LFO multiplier を計算（呼吸感） ----
+            //
+            // 出力全体を multiplier 1 ± depth の範囲でゆっくり呼吸させる。
+            // pitch LFO とは独立、超低周波（30〜60s 周期）。
+            // depth=0 または phaseIncrement=0（period<=0）のときは multiplier=1.0 で実質無効。
+            // 両方チェックすることで「period=0 + depth>0 + initialPhase≠0」のような中途半端な
+            // 設定が「固定ゲイン」として残らないようにする。
+            var envelopePhase = state.envelopePhase
+            let envelopeMultiplier: Float
+            if state.envelopeDepth != 0.0 && state.envelopePhaseIncrement != 0.0 {
+                envelopeMultiplier = 1.0 + state.envelopeDepth * Float(sin(envelopePhase))
+            } else {
+                envelopeMultiplier = 1.0
+            }
+
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             //
             // 基準 phaseIncrement に LFO modRatio を乗算してブロック内で使う。
@@ -222,11 +247,16 @@ final class DroneGenerator {
                     state.harmonics[i] = h
                 }
 
+                // Envelope multiplier をブロック単位で全出力に乗算（呼吸感）。
+                // ブロック単位で十分（envelope は超低周波で 5.8ms 内の変化は無視できる）。
+                let outL = sampleL * envelopeMultiplier
+                let outR = sampleR * envelopeMultiplier
+
                 if isStereo {
-                    bufferL[frame] = sampleL
-                    bufferR[frame] = sampleR
+                    bufferL[frame] = outL
+                    bufferR[frame] = outR
                 } else {
-                    bufferL[frame] = (sampleL + sampleR) * 0.5
+                    bufferL[frame] = (outL + outR) * 0.5
                 }
             }
 
@@ -238,11 +268,18 @@ final class DroneGenerator {
                 lfoPhase = lfoPhase.truncatingRemainder(dividingBy: twoPi)
             }
 
+            // Envelope phase も同様にブロック単位で進めて折り返す。
+            envelopePhase += state.envelopePhaseIncrement * Double(frameCount)
+            if envelopePhase >= twoPi {
+                envelopePhase = envelopePhase.truncatingRemainder(dividingBy: twoPi)
+            }
+
             state.phaseLeft = phaseLeft
             state.phaseRight = phaseRight
             state.currentAmplitude = amplitude
             state.activeFadeFramesRemaining = framesRemaining
             state.lfoPhase = lfoPhase
+            state.envelopePhase = envelopePhase
             return noErr
         }
     }

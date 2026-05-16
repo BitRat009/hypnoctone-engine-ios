@@ -62,6 +62,15 @@ final class NoiseRenderState {
     /// `2π / (filterLfoPeriodSeconds × sampleRate)`。period=0 で 0（実質無効化）。
     let filterLfoPhaseIncrement: Double
 
+    // MARK: - 定数 — Envelope LFO（全体音量ゆらぎ / 呼吸感）
+
+    /// Envelope LFO 深さ（multiplier の振幅。0.075 なら出力が 0.925〜1.075 で揺れる）。0 で無効。
+    let envelopeDepth: Float
+
+    /// Envelope LFO の 1 サンプルあたり位相増分（ラジアン）。
+    /// `2π / (envelopePeriodSeconds × sampleRate)`。Drone と同じ値を渡せば同期して呼吸する。
+    let envelopePhaseIncrement: Double
+
     // MARK: - Audio thread 単一所有 — fade
 
     /// 現在の振幅（サンプル単位に補間された値）。
@@ -118,6 +127,10 @@ final class NoiseRenderState {
     /// L/R 共通の LFO（雨音の密度変化は左右で同じ方向に動く想定）。
     var filterLfoPhase: Double = 0.0
 
+    /// Envelope LFO の現在位相（ラジアン）。audio thread 単一所有。
+    /// Drone と同じ初期位相・周期を渡せば自然に同期して全体が呼吸する。
+    var envelopePhase: Double = 0.0
+
     // MARK: - Main writer / Audio reader（pending command, 全 atomic）
 
     /// 次の fade で目指す振幅（Float の bitPattern を保持）。
@@ -139,12 +152,18 @@ final class NoiseRenderState {
     ///   - filterCutoffCenter: Lowpass cutoff の中心周波数（Hz）。既定 2000Hz で「雨音」の中域。
     ///   - filterCutoffDepthHz: Lowpass cutoff の LFO 深さ（±Hz）。既定 400Hz。
     ///   - filterLfoPeriodSeconds: Filter cutoff LFO の周期（秒）。既定 11 秒。0 で LFO 無効。
+    ///   - envelopePeriodSeconds: Envelope LFO 周期（秒）。0 で無効。Sleep 用途では 30〜60 秒。
+    ///   - envelopeDepth: Envelope LFO 深さ。0.075 で出力 0.925〜1.075 範囲に揺れる。0 で無効。
+    ///   - envelopeInitialPhase: Envelope LFO 初期位相。Drone と同じ値で同期。
     init(
         sampleRate: Double,
         defaultAmplitude: Float = 0.08,
         filterCutoffCenter: Double = 2000.0,
         filterCutoffDepthHz: Double = 400.0,
-        filterLfoPeriodSeconds: Double = 11.0
+        filterLfoPeriodSeconds: Double = 11.0,
+        envelopePeriodSeconds: Double = 0.0,
+        envelopeDepth: Float = 0.0,
+        envelopeInitialPhase: Double = 0.0
     ) {
         self.sampleRate = sampleRate
         self.defaultAmplitude = defaultAmplitude
@@ -155,5 +174,12 @@ final class NoiseRenderState {
         } else {
             self.filterLfoPhaseIncrement = 0.0
         }
+        self.envelopeDepth = envelopeDepth
+        if envelopePeriodSeconds > 0 {
+            self.envelopePhaseIncrement = 2.0 * Double.pi / (envelopePeriodSeconds * sampleRate)
+        } else {
+            self.envelopePhaseIncrement = 0.0
+        }
+        self.envelopePhase = envelopeInitialPhase
     }
 }

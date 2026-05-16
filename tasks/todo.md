@@ -318,11 +318,44 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Phase 4: Codex レビュー
       - Critical/High/Medium 全てなし、一発 OK
       - Low 改善提案「ローカル変数取得 + 最後書き戻し」を反映（コード意図も明確化）
-- [ ] Phase 5: push → Codemagic → artifacts_014 で倍音化を実証
+- [x] Phase 5: push → Codemagic → artifacts_014 で倍音化を完全実証
+      - WAV stereo / 4.09s 維持、L/R 検査クリア（L_MAX 5242, R_MAX 5200, DIFF_MAX 4147）
+      - crash 無し（pid 1875 全 probe 生存）
+      - **Goertzel で全 5 つの倍音ピーク出現を確認**（Task 12 vs Task 13, L channel）:
+        - 220Hz (基音): 2286 → 2286 ±0 ✓ 基音完全維持
+        - 330Hz (基音): 1112 → 1112 ±0 ✓ 基音完全維持
+        - 440Hz (基音+220第2): 187 → 223 (+19%) ✓ 重畳で増強
+        - 660Hz (220第3+330第2): 4.5 → 204 (× 45 倍!) ✓ 新規ピーク
+        - 880Hz (440第2): 4.0 → 22 (× 5.6) ✓ 新規ピーク
+        - 990Hz (330第3): 2.8 → 20 (× 7.1) ✓ 新規ピーク
+        - 1320Hz (440第3): 2.5 → 4.6 (× 1.8) ✓ 弱いが立つ
+      - 対照点 550/770/1100Hz は変化なし（ノイズフロア維持）
+      - 倍音構成が「ハーモニウム/オルガン系」の自然な減衰
+      - クリッピング余裕 (peak 5242/32767 = 16%)
+
+## Task 14 — 音質アップ第 6 弾: エンベロープゆらぎ（全体音量の呼吸感）
+
+- [x] Phase 1: ToneRenderState + NoiseRenderState に envelope LFO state 追加
+      - 両 RenderState に envelopeDepth (定数), envelopePhaseIncrement (定数), envelopePhase (audio var)
+      - init に envelopePeriodSeconds / envelopeDepth / envelopeInitialPhase パラメータ
+      - pitch LFO とは独立の別レイヤー
+- [x] Phase 2: DroneGenerator + NoiseGenerator render block に envelope multiplier 適用
+      - ブロック単位で envMultiplier = 1.0 + depth × sin(envelopePhase) を計算
+      - ループ最終出力 sampleL/R に乗算してから buffer 書き込み
+      - 倍音/lowpass を含む全体に同じ envelope が掛かる
+      - ブロック末尾で envelopePhase を進めて 2π 折り返し
+      - depth=0 または phaseIncrement=0 のとき multiplier=1.0 で無効化（中途半端設定対策）
+- [x] Phase 3: AudioEngineController で全 generator に共通 envelope 設定
+      - Drone 3 声 + Noise すべてに period=37s / depth=0.075 / initialPhase=0
+      - 同じ周期・初期位相 → 同じ frame 数進行で実用上同期
+      - Headroom: 0.4 × 1.075 = 0.43、mainMixer 0.5 経由で 0.22 実効
+      - クラスドキュメントに「同期呼吸」明示
+- [x] Phase 4: Codex レビュー
+      - Critical/High なし、Medium 2 件 (同期保証精度 + 中途半端設定ガード) → 反映後最終 OK
+      - 「将来 graph 変更時は共有 sample clock / mixer 後段 envelope に移行」コメント明記
+- [ ] Phase 5: push → Codemagic → artifacts_015 で envelope を実証
       - 期待: WAV stereo 維持、L/R 検査クリア、crash 無し
-      - Goertzel で倍音ピーク出現:
-        - 220 基音 → 440 / 660 のピーク
-        - 330 基音 → 660 / 990 のピーク
-        - 440 基音 → 880 / 1320 のピーク
-        - 220 の第 2 倍音 (440) と 3 声 Drone のオクターブ声 (440) が重なって 440Hz が特に強くなる
-      - クリッピング無し（peak 上限 0.22 実効で 16bit 余裕）
+      - 基音/倍音の Goertzel mag は維持 (envelope は周波数を変えない)
+      - WAV 4 秒中で 37秒 envelope は 1/9 周期しか進まないが、初期位相 0 から sin の上昇区間 (0→π/2)
+        を 4秒で約 39° (4/37×360) 進むので、定常区間で peak が緩やかに +~3% 程度変化する想定
+      - クリッピング無し

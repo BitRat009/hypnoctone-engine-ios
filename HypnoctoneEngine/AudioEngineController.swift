@@ -8,7 +8,9 @@ import os
 /// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune、各声に独立 LFO で pitch vibrato、
 ///  各声に第 2 / 第 3 倍音で楽器的温かみ）と
 /// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
-/// `mainMixerNode` で並列ミックスする。出力フォーマットは 2ch stereo（Task 10 から）。
+/// `mainMixerNode` で並列ミックスする。全 generator に同じ envelope LFO（37 秒周期 / ±7.5%）を
+/// 適用して「全体が一緒に呼吸」する呼吸感を作る。
+/// 出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
 /// ## 想定する呼び出しスレッド
@@ -142,20 +144,30 @@ final class AudioEngineController {
         // 3 声のゆらぎが揃わない（時間軸で複雑に変化し続ける）ようにする。周期は素数寄りの
         // 13.7 / 17.3 / 23.1 秒で、互いに約分しにくい比のため聴感上の繰り返しが目立たない。
         //
-        // Headroom 評価（Task 13 で各声に倍音追加）:
-        //   - Drone 3 声 × （基音 + 第2倍音 0.2 + 第3倍音 0.1 の振幅係数）
-        //     peak 厳密上限 = (0.15 + 0.08 + 0.05) × (1 + 0.2 + 0.1) = 0.28 × 1.3 = 0.364
-        //     （LFO は pitch のみで amplitude には影響しない）
-        //   - Noise は Paul Kellet's filter + 1-pole lowpass の出力に
-        //     defaultAmplitude=0.08 を掛けた統計信号（hard limit 無し）
-        //   - 合算で実効ピークは 0.4 前後の見込み
-        //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.2 前後
+        // Headroom 評価（Task 14 で envelope LFO ±7.5% multiplier 追加）:
+        //   - Drone 3 声 × （基音 + 第2倍音 0.2 + 第3倍音 0.1）= 0.28 × 1.3 = 0.364
+        //   - Noise は Paul Kellet's filter + lowpass の統計信号 ≈ 0.08
+        //   - 合算 ≈ 0.4 → envelope multiplier 最大 1.075 で 0.43 前後
+        //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.22 前後
         // 16bit s16le 換算 (32767) でも余裕がある見込み。CI の WAV 検査でクリッピング無しを実測確認する。
         //
         // 倍音設定: 第 2 倍音 (× 2) を基音の 20%、第 3 倍音 (× 3) を 10%。
         // 偶数 + 奇数の自然な組み合わせで、ハーモニウム / オルガン系の温かみを出す。
-        // 3 声すべて同じ倍音構成にして、和音全体に一貫した楽器感を持たせる。
         let harmonics: [(Double, Float)] = [(2.0, 0.2), (3.0, 0.1)]
+
+        // Envelope LFO（呼吸感）: 全 generator 共通の 37 秒周期 / ±7.5%。
+        // pitch LFO（13〜23秒）よりさらに遅い超低周波で、Sleep アプリ全体が一緒に呼吸する。
+        //
+        // 同期の仕組み: 各 generator は独立した envelopePhase を持つが、同じ周期・初期位相で
+        // 初期化し、各 render block が同じ frame 数分だけ phase を進めることで実用上同期する。
+        // これは AVAudioEngine が「同一 mixer に並列接続された source node に同じ pull 履歴で
+        // 同じ frame 数を要求する」という現行構成での想定に依存する。将来 format converter や
+        // node bypass、サブグラフ分岐が入る場合は「共有 sample clock から sin を計算」または
+        // 「mixer 後段に 1 つの共通 envelope」へ移行する必要がある。
+        let envelopePeriod: Double = 37.0
+        let envelopeDepth: Float = 0.075
+        let envelopeInitialPhase: Double = 0.0
+
         let fifthFrequency = rootFrequency * 1.5
         let octaveFrequency = rootFrequency * 2.0
         self.droneGenerators = [
@@ -163,29 +175,37 @@ final class AudioEngineController {
                 format: format, frequency: rootFrequency,
                 lfoPeriodSeconds: 17.3, lfoDepthCents: 2.5, lfoInitialPhase: 0.0,
                 harmonics: harmonics,
+                envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
+                envelopeInitialPhase: envelopeInitialPhase,
                 defaultAmplitude: 0.15
             ),
             DroneGenerator(
                 format: format, frequency: fifthFrequency,
                 lfoPeriodSeconds: 23.1, lfoDepthCents: 2.0, lfoInitialPhase: .pi / 2,
                 harmonics: harmonics,
+                envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
+                envelopeInitialPhase: envelopeInitialPhase,
                 defaultAmplitude: 0.08
             ),
             DroneGenerator(
                 format: format, frequency: octaveFrequency,
                 lfoPeriodSeconds: 13.7, lfoDepthCents: 1.5, lfoInitialPhase: .pi,
                 harmonics: harmonics,
+                envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
+                envelopeInitialPhase: envelopeInitialPhase,
                 defaultAmplitude: 0.05
             ),
         ]
-        // Noise: 雨音風 lowpass + cutoff LFO（11秒周期、中心 2000Hz ±400Hz）。
-        // パラメータは NoiseGenerator のデフォルト値だが、設定の意図を明示するため敢えて渡す。
+        // Noise: 雨音風 lowpass + cutoff LFO + Drone と同期する envelope LFO。
         self.noiseGenerator = NoiseGenerator(
             format: format,
             defaultAmplitude: 0.08,
             filterCutoffCenter: 2000.0,
             filterCutoffDepthHz: 400.0,
-            filterLfoPeriodSeconds: 11.0
+            filterLfoPeriodSeconds: 11.0,
+            envelopePeriodSeconds: envelopePeriod,
+            envelopeDepth: envelopeDepth,
+            envelopeInitialPhase: envelopeInitialPhase
         )
 
         // offline モードでは attach / connect の前に manual rendering を有効化する必要がある。

@@ -140,6 +140,16 @@ final class ToneRenderState {
     /// LFO の 1 サンプルあたり位相増分（ラジアン）。`2π / (lfoPeriodSeconds × sampleRate)`。
     let lfoPhaseIncrement: Double
 
+    // MARK: - Envelope LFO（全体音量ゆらぎ / 呼吸感）— 定数
+
+    /// Envelope LFO 深さ（multiplier の振幅。0.075 なら出力が 0.925〜1.075 で揺れる）。
+    /// 0 なら envelope 無効（multiplier は常に 1.0）。
+    let envelopeDepth: Float
+
+    /// Envelope LFO の 1 サンプルあたり位相増分（ラジアン）。
+    /// `2π / (envelopePeriodSeconds × sampleRate)`。Sleep 用途では超低周波 30〜60 秒周期。
+    let envelopePhaseIncrement: Double
+
     // MARK: - Audio thread 単一所有（writer/reader とも audio thread のみ）
 
     /// L チャネルの現在の位相（ラジアン）。
@@ -158,6 +168,11 @@ final class ToneRenderState {
     /// 倍音は基音と同じ LFO modRatio で揺らされ、L/R detune の比率も基音の倍率に追従する
     /// （第 2 倍音の L/R 差は基音の 2 倍 = ビート周期も 1/2 になる）。
     var harmonics: [HarmonicVoice]
+
+    /// Envelope LFO の現在位相（ラジアン）。audio thread 単一所有。
+    /// ブロックごとに `envelopePhaseIncrement × frameCount` 進めて 2π 折り返し。
+    /// pitch LFO とは独立、全 generator で同じ初期位相を渡せば自然に同期する。
+    var envelopePhase: Double
 
     /// 現在の振幅（サンプル単位に補間された値）。
     var currentAmplitude: Float = 0.0
@@ -205,6 +220,12 @@ final class ToneRenderState {
     ///   - harmonics: 基音に加算する倍音群。`(ratio, amplitudeFactor)` のタプル配列で、
     ///     例えば `[(2.0, 0.2), (3.0, 0.1)]` なら第 2 倍音を基音の 20%、第 3 倍音を 10% で混ぜる。
     ///     空配列なら純サイン波。各倍音の phase は 0 から開始する（基音と同位相）。
+    ///   - envelopePeriodSeconds: Envelope LFO 周期（秒）。0 で envelope 無効。
+    ///     Sleep 用途では 30〜60 秒の超低周波。
+    ///   - envelopeDepth: Envelope LFO 深さ（multiplier の振幅）。0.075 なら出力が
+    ///     0.925〜1.075 で揺れる。0 で envelope 無効。
+    ///   - envelopeInitialPhase: Envelope LFO 初期位相（ラジアン）。複数 generator で
+    ///     同じ値を渡せば「全体が同期して呼吸」する。
     ///   - defaultAmplitude: 定常時の基本振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         frequency: Double,
@@ -214,6 +235,9 @@ final class ToneRenderState {
         lfoDepthCents: Double = 0.0,
         lfoInitialPhase: Double = 0.0,
         harmonics: [(ratio: Double, amplitudeFactor: Float)] = [],
+        envelopePeriodSeconds: Double = 0.0,
+        envelopeDepth: Float = 0.0,
+        envelopeInitialPhase: Double = 0.0,
         defaultAmplitude: Float = 0.2
     ) {
         self.frequency = frequency
@@ -254,5 +278,14 @@ final class ToneRenderState {
                 phaseRight: 0.0
             )
         }
+
+        // Envelope LFO 計算: period > 0 のとき有効、それ以外は increment=0 で実質無効化。
+        self.envelopeDepth = envelopeDepth
+        if envelopePeriodSeconds > 0 {
+            self.envelopePhaseIncrement = twoPi / (envelopePeriodSeconds * sampleRate)
+        } else {
+            self.envelopePhaseIncrement = 0.0
+        }
+        self.envelopePhase = envelopeInitialPhase
     }
 }

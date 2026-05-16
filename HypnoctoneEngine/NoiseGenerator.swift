@@ -27,6 +27,10 @@ import os
 /// cutoff 周波数を超低周波 LFO（既定 11 秒周期、中心 2000Hz、±400Hz）で揺らす。
 /// 「シャワー」「シャラシャラ」のような自然な帯域変化を作る。LFO は L/R 共通。
 ///
+/// ## 全体エンベロープ
+/// `envelopeDepth` > 0 のとき、超低周波（30〜60s 周期）の envelope LFO で全体音量を
+/// ±depth の範囲で呼吸させる。Drone と同じ周期/位相を指定すれば自然に同期する。
+///
 /// ## fade ロジック（odd/even seqlock）
 /// `DroneGenerator` と同じプロトコル。詳細は `ToneRenderState` のコメント参照。
 @MainActor
@@ -65,12 +69,18 @@ final class NoiseGenerator {
     ///   - filterCutoffCenter: Lowpass cutoff の中心周波数（Hz）。既定 2000Hz（雨音中域）。
     ///   - filterCutoffDepthHz: Cutoff LFO 深さ（±Hz）。既定 400Hz。
     ///   - filterLfoPeriodSeconds: Cutoff LFO 周期（秒）。既定 11 秒。
+    ///   - envelopePeriodSeconds: Envelope LFO 周期（秒）。0 で無効。Drone と揃えて同期呼吸。
+    ///   - envelopeDepth: Envelope LFO 深さ。0.075 で 0.925〜1.075 範囲。
+    ///   - envelopeInitialPhase: Envelope LFO 初期位相。Drone と同じ値で同期。
     init(
         format: AVAudioFormat,
         defaultAmplitude: Float = 0.08,
         filterCutoffCenter: Double = 2000.0,
         filterCutoffDepthHz: Double = 400.0,
-        filterLfoPeriodSeconds: Double = 11.0
+        filterLfoPeriodSeconds: Double = 11.0,
+        envelopePeriodSeconds: Double = 0.0,
+        envelopeDepth: Float = 0.0,
+        envelopeInitialPhase: Double = 0.0
     ) {
         self.sourceFormat = format
         self.sampleRate = format.sampleRate
@@ -80,7 +90,10 @@ final class NoiseGenerator {
             defaultAmplitude: defaultAmplitude,
             filterCutoffCenter: filterCutoffCenter,
             filterCutoffDepthHz: filterCutoffDepthHz,
-            filterLfoPeriodSeconds: filterLfoPeriodSeconds
+            filterLfoPeriodSeconds: filterLfoPeriodSeconds,
+            envelopePeriodSeconds: envelopePeriodSeconds,
+            envelopeDepth: envelopeDepth,
+            envelopeInitialPhase: envelopeInitialPhase
         )
 
         // closure 内で参照するために local capture（self を捕捉しない）。
@@ -125,6 +138,17 @@ final class NoiseGenerator {
             // cutoff は理論上 [center-depth, center+depth] の範囲だが念のため正値クランプ。
             let cutoffClamped = max(20.0, min(cutoff, state.sampleRate / 2.0 - 100.0))
             let alpha = Float(1.0 - exp(-2.0 * Double.pi * cutoffClamped / state.sampleRate))
+
+            // ---- Envelope LFO multiplier をブロック先頭で計算（呼吸感） ----
+            // Drone と同じ周期/位相を渡せば自然に同期する。
+            // depth=0 または phaseIncrement=0 のとき実質無効（DroneGenerator と同じガード）。
+            var envelopePhase = state.envelopePhase
+            let envelopeMultiplier: Float
+            if state.envelopeDepth != 0.0 && state.envelopePhaseIncrement != 0.0 {
+                envelopeMultiplier = 1.0 + state.envelopeDepth * Float(sin(envelopePhase))
+            } else {
+                envelopeMultiplier = 1.0
+            }
 
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             var amplitude = state.currentAmplitude
@@ -188,8 +212,8 @@ final class NoiseGenerator {
                 lpL += alpha * (pinkL - lpL)
                 lpR += alpha * (pinkR - lpR)
 
-                let sampleL = lpL * amplitude
-                let sampleR = lpR * amplitude
+                let sampleL = lpL * amplitude * envelopeMultiplier
+                let sampleR = lpR * amplitude * envelopeMultiplier
 
                 if isStereo {
                     bufferL[frame] = sampleL
@@ -206,6 +230,12 @@ final class NoiseGenerator {
                 filterLfoPhase = filterLfoPhase.truncatingRemainder(dividingBy: twoPi)
             }
 
+            // Envelope LFO phase も同様に進めて 2π 折り返し。
+            envelopePhase += state.envelopePhaseIncrement * Double(frameCount)
+            if envelopePhase >= twoPi {
+                envelopePhase = envelopePhase.truncatingRemainder(dividingBy: twoPi)
+            }
+
             // 更新後の state を書き戻す。
             state.currentAmplitude = amplitude
             state.activeFadeFramesRemaining = framesRemaining
@@ -218,6 +248,7 @@ final class NoiseGenerator {
             state.lpL = lpL
             state.lpR = lpR
             state.filterLfoPhase = filterLfoPhase
+            state.envelopePhase = envelopePhase
             return noErr
         }
     }
