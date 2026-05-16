@@ -5,7 +5,8 @@ import os
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
 /// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
-/// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune、各声に独立 LFO で pitch vibrato）と
+/// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune、各声に独立 LFO で pitch vibrato、
+///  各声に第 2 / 第 3 倍音で楽器的温かみ）と
 /// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
 /// `mainMixerNode` で並列ミックスする。出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
@@ -141,32 +142,39 @@ final class AudioEngineController {
         // 3 声のゆらぎが揃わない（時間軸で複雑に変化し続ける）ようにする。周期は素数寄りの
         // 13.7 / 17.3 / 23.1 秒で、互いに約分しにくい比のため聴感上の繰り返しが目立たない。
         //
-        // Headroom 評価（Task 12 で Noise amp 0.05→0.08 に増加）:
-        //   - Drone 3 声は純サイン波で peak 厳密上限 = 0.15 + 0.08 + 0.05 = 0.28
-        //     （LFO は pitch のみで amplitude には影響しないので peak 上限は不変）
+        // Headroom 評価（Task 13 で各声に倍音追加）:
+        //   - Drone 3 声 × （基音 + 第2倍音 0.2 + 第3倍音 0.1 の振幅係数）
+        //     peak 厳密上限 = (0.15 + 0.08 + 0.05) × (1 + 0.2 + 0.1) = 0.28 × 1.3 = 0.364
+        //     （LFO は pitch のみで amplitude には影響しない）
         //   - Noise は Paul Kellet's filter + 1-pole lowpass の出力に
-        //     defaultAmplitude=0.08 を掛けた統計信号（hard limit 無し）。
-        //     ピンクノイズ自体は ±1 を超える瞬時値も理論上は出るが実測でほぼ ±0.08 のオーダー、
-        //     lowpass で高域カットされる分さらに RMS は下がる
-        //   - 合算で実効ピークは 0.3 前後の見込み
-        //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.15 前後
-        // 16bit s16le 換算でも余裕がある見込み。CI の WAV 検査でクリッピング無しを実測確認する。
+        //     defaultAmplitude=0.08 を掛けた統計信号（hard limit 無し）
+        //   - 合算で実効ピークは 0.4 前後の見込み
+        //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.2 前後
+        // 16bit s16le 換算 (32767) でも余裕がある見込み。CI の WAV 検査でクリッピング無しを実測確認する。
+        //
+        // 倍音設定: 第 2 倍音 (× 2) を基音の 20%、第 3 倍音 (× 3) を 10%。
+        // 偶数 + 奇数の自然な組み合わせで、ハーモニウム / オルガン系の温かみを出す。
+        // 3 声すべて同じ倍音構成にして、和音全体に一貫した楽器感を持たせる。
+        let harmonics: [(Double, Float)] = [(2.0, 0.2), (3.0, 0.1)]
         let fifthFrequency = rootFrequency * 1.5
         let octaveFrequency = rootFrequency * 2.0
         self.droneGenerators = [
             DroneGenerator(
                 format: format, frequency: rootFrequency,
                 lfoPeriodSeconds: 17.3, lfoDepthCents: 2.5, lfoInitialPhase: 0.0,
+                harmonics: harmonics,
                 defaultAmplitude: 0.15
             ),
             DroneGenerator(
                 format: format, frequency: fifthFrequency,
                 lfoPeriodSeconds: 23.1, lfoDepthCents: 2.0, lfoInitialPhase: .pi / 2,
+                harmonics: harmonics,
                 defaultAmplitude: 0.08
             ),
             DroneGenerator(
                 format: format, frequency: octaveFrequency,
                 lfoPeriodSeconds: 13.7, lfoDepthCents: 1.5, lfoInitialPhase: .pi,
+                harmonics: harmonics,
                 defaultAmplitude: 0.05
             ),
         ]

@@ -1,6 +1,31 @@
 import Foundation
 import Atomics
 
+/// 1 つの倍音（harmonic partial）の状態。基音に対する周波数比と振幅係数、
+/// および L/R 別の位相情報を保持する。`ToneRenderState.harmonics` 配列の要素として使われる。
+/// 倍音は基音と同じ LFO modRatio で揺らされるので、ここでは modRatio 後の値ではなく
+/// **LFO 中立時の基準** phaseIncrement を保持する（DroneGenerator render block が
+/// ブロック単位で modRatio を掛ける）。
+struct HarmonicVoice {
+    /// 基音に対する周波数比（2.0 = 第 2 倍音、3.0 = 第 3 倍音）。
+    let ratio: Double
+
+    /// 基音振幅に対する相対振幅（0.2 なら基音の 20%）。
+    let amplitudeFactor: Float
+
+    /// L チャネル用の 1 サンプル位相増分（LFO 中立時）。
+    let phaseIncrementLeft: Double
+
+    /// R チャネル用の 1 サンプル位相増分（LFO 中立時）。
+    let phaseIncrementRight: Double
+
+    /// L チャネルの現在位相（audio thread が単一所有で更新）。
+    var phaseLeft: Double
+
+    /// R チャネルの現在位相（audio thread が単一所有で更新）。
+    var phaseRight: Double
+}
+
 /// サイン波生成と振幅補間（フェードイン / フェードアウト）に必要な状態を保持するクラス。
 ///
 /// `DroneGenerator` の内部実装として使われる。`AVAudioSourceNode` の render block と
@@ -127,6 +152,13 @@ final class ToneRenderState {
     /// 1 ブロック (frameCount サンプル) 進めるたびに `lfoPhaseIncrement * frameCount` だけ加算。
     var lfoPhase: Double
 
+    /// 基音に加算する倍音群（audio thread 単一所有）。
+    /// 各要素は `HarmonicVoice` で、ratio・amplitudeFactor・L/R 位相情報を持つ。
+    /// 空配列なら倍音なし（純サイン波）。
+    /// 倍音は基音と同じ LFO modRatio で揺らされ、L/R detune の比率も基音の倍率に追従する
+    /// （第 2 倍音の L/R 差は基音の 2 倍 = ビート周期も 1/2 になる）。
+    var harmonics: [HarmonicVoice]
+
     /// 現在の振幅（サンプル単位に補間された値）。
     var currentAmplitude: Float = 0.0
 
@@ -170,6 +202,9 @@ final class ToneRenderState {
     ///     超低周波が自然。0 以下を渡せば LFO 無効（depth を 0 にしてもよい）。
     ///   - lfoDepthCents: LFO 深さ（cent、±この値で pitch が揺れる）。0 で LFO 無効。
     ///   - lfoInitialPhase: LFO の初期位相（ラジアン）。複数声で位相をずらしてゆらぎが揃わないようにする。
+    ///   - harmonics: 基音に加算する倍音群。`(ratio, amplitudeFactor)` のタプル配列で、
+    ///     例えば `[(2.0, 0.2), (3.0, 0.1)]` なら第 2 倍音を基音の 20%、第 3 倍音を 10% で混ぜる。
+    ///     空配列なら純サイン波。各倍音の phase は 0 から開始する（基音と同位相）。
     ///   - defaultAmplitude: 定常時の基本振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         frequency: Double,
@@ -178,6 +213,7 @@ final class ToneRenderState {
         lfoPeriodSeconds: Double = 0.0,
         lfoDepthCents: Double = 0.0,
         lfoInitialPhase: Double = 0.0,
+        harmonics: [(ratio: Double, amplitudeFactor: Float)] = [],
         defaultAmplitude: Float = 0.2
     ) {
         self.frequency = frequency
@@ -202,5 +238,21 @@ final class ToneRenderState {
             self.lfoPhaseIncrement = 0.0
         }
         self.lfoPhase = lfoInitialPhase
+
+        // 倍音群を構築: 各倍音の L/R phaseIncrement は基音の phaseIncrement × ratio。
+        // L/R detune は基音で既に決まっているので、倍音は ratio 倍するだけで自動的に
+        // L/R 間距離が ratio 倍に広がる（第 2 倍音なら detune も 2 倍 → ビート周期 1/2）。
+        let baseIncL = self.phaseIncrementLeft
+        let baseIncR = self.phaseIncrementRight
+        self.harmonics = harmonics.map { h in
+            HarmonicVoice(
+                ratio: h.ratio,
+                amplitudeFactor: h.amplitudeFactor,
+                phaseIncrementLeft: baseIncL * h.ratio,
+                phaseIncrementRight: baseIncR * h.ratio,
+                phaseLeft: 0.0,
+                phaseRight: 0.0
+            )
+        }
     }
 }

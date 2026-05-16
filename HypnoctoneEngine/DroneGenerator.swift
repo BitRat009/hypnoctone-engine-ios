@@ -4,10 +4,11 @@ import os
 
 /// Sleep モード基底音となる Drone（持続音）を生成する。
 ///
-/// L/R で `detuneCents` だけ周波数をずらした stereo サイン波を出力する。
+/// L/R で `detuneCents` だけ周波数をずらした stereo サイン波（+ 任意の倍音）を出力する。
 /// detune によるゆるいビート（基音 220Hz / detune 2cent で約 4 秒周期）が
 /// 「広がり感」を、`lfoDepthCents` > 0 のときは LFO（pitch vibrato）が
-/// 周期数十秒の超低周波で「揺らぎ感」を与え、Sleep 用途で疲れない音場を作る。
+/// 周期数十秒の超低周波で「揺らぎ感」を、`harmonics` が空でない場合は倍音が
+/// 「楽器的な温かみ」を与え、Sleep 用途で疲れない音場を作る。
 /// `AudioEngineController` がこの Generator を保持し、`AVAudioEngine` に attach する。
 ///
 /// ## スレッドモデル
@@ -64,6 +65,8 @@ final class DroneGenerator {
     ///   - lfoPeriodSeconds: LFO（pitch vibrato）の周期（秒）。0 で無効。Sleep 用途では 10〜30 秒。
     ///   - lfoDepthCents: LFO 深さ（cent）。0 で無効。detune と同等の ±数 cent が自然。
     ///   - lfoInitialPhase: LFO 初期位相（ラジアン）。複数声で位相をずらすと揺れが揃わない。
+    ///   - harmonics: 基音に加算する倍音群。例えば `[(2.0, 0.2), (3.0, 0.1)]` で
+    ///     第 2 倍音 (基音の 20%) と第 3 倍音 (10%) を混ぜる。空配列で純サイン波。
     ///   - defaultAmplitude: 定常時の振幅（0.0〜1.0）。既定は小音量の 0.2。
     init(
         format: AVAudioFormat,
@@ -72,6 +75,7 @@ final class DroneGenerator {
         lfoPeriodSeconds: Double = 0.0,
         lfoDepthCents: Double = 0.0,
         lfoInitialPhase: Double = 0.0,
+        harmonics: [(ratio: Double, amplitudeFactor: Float)] = [],
         defaultAmplitude: Float = 0.2
     ) {
         self.sourceFormat = format
@@ -84,6 +88,7 @@ final class DroneGenerator {
             lfoPeriodSeconds: lfoPeriodSeconds,
             lfoDepthCents: lfoDepthCents,
             lfoInitialPhase: lfoInitialPhase,
+            harmonics: harmonics,
             defaultAmplitude: defaultAmplitude
         )
 
@@ -174,6 +179,9 @@ final class DroneGenerator {
             let bufferL = UnsafeMutableBufferPointer<Float>(ablPointer[0])
             let bufferR = isStereo ? UnsafeMutableBufferPointer<Float>(ablPointer[1]) : bufferL
 
+            // 倍音数（ブロック内で配列の count が変わらないことを利用）。
+            let harmonicsCount = state.harmonics.count
+
             for frame in 0..<Int(frameCount) {
                 // フェード残りがあれば 1 サンプル分だけ target に近づける。
                 if framesRemaining > 0 {
@@ -184,13 +192,35 @@ final class DroneGenerator {
                     amplitude = target
                 }
 
-                let sampleL = Float(sin(phaseLeft)) * amplitude
-                let sampleR = Float(sin(phaseRight)) * amplitude
+                // 基音サイン波を生成。
+                var sampleL = Float(sin(phaseLeft)) * amplitude
+                var sampleR = Float(sin(phaseRight)) * amplitude
 
                 phaseLeft += phaseIncrementLeft
                 if phaseLeft >= twoPi { phaseLeft -= twoPi }
                 phaseRight += phaseIncrementRight
                 if phaseRight >= twoPi { phaseRight -= twoPi }
+
+                // 倍音を加算合成。各倍音にも LFO modRatio を同じく掛ける（楽器的に自然）。
+                // 要素を一度ローカル var に取り出して最後に書き戻すことで配列の
+                // subscript uniqueness check を 1 iteration あたり read+write の 2 回に抑える
+                // （将来倍音数を増やしても線形に効く改善）。
+                for i in 0..<harmonicsCount {
+                    var h = state.harmonics[i]
+                    let hIncL = h.phaseIncrementLeft * lfoMod
+                    let hIncR = h.phaseIncrementRight * lfoMod
+                    let hAmp = amplitude * h.amplitudeFactor
+
+                    sampleL += Float(sin(h.phaseLeft)) * hAmp
+                    sampleR += Float(sin(h.phaseRight)) * hAmp
+
+                    h.phaseLeft += hIncL
+                    if h.phaseLeft >= twoPi { h.phaseLeft -= twoPi }
+                    h.phaseRight += hIncR
+                    if h.phaseRight >= twoPi { h.phaseRight -= twoPi }
+
+                    state.harmonics[i] = h
+                }
 
                 if isStereo {
                     bufferL[frame] = sampleL

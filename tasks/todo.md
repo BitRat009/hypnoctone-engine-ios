@@ -284,7 +284,45 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - クラスドキュメント / Headroom コメント更新（Noise が hard limit 無し統計信号と明示）
 - [x] Phase 4: Codex レビュー
       - Critical/High なし、Medium 2 件（α コメント精度 + Headroom 表現）→ 反映後最終 OK
-- [ ] Phase 5: push → Codemagic → artifacts_013 で雨音風 lowpass を実証
-      - 期待: WAV stereo 維持、L/R 検査クリア、Drone 220/330/440 のピーク維持
-      - 高域 (例 5000Hz, 8000Hz) の Goertzel mag が Task 11 比で大幅低下 = lowpass の証拠
-      - crash 無し、クリッピング無し
+- [x] Phase 5: push → Codemagic → artifacts_013 で雨音風 lowpass を完全実証
+      - WAV stereo / 4.09s / L/R 検査クリア（L_MAX 5159, R_MAX 4982, DIFF_MAX 4173）
+      - crash 無し（pid 1881 全 probe 生存）
+      - Drone 220/330/440Hz mag は Task 11 から完全維持（lowpass が Drone に影響しないことを実証）
+      - **高域 Goertzel mag の比較で lowpass を実証**（Task 11 vs Task 12, L channel）:
+        - 1000Hz: 0.99 → 1.57 (+58%, 中低域底上げ = amp 0.05→0.08 効果)
+        - 2000Hz (cutoff): 1.41 → 1.70 (+20%, まだ通過)
+        - 4000Hz: 0.39 → 0.30 (-23%, 減衰開始)
+        - 7000Hz: 0.78 → 0.36 (-54%, 急減衰)
+        - 10000Hz: 0.38 → 0.15 (-61%, 急減衰)
+        - 14000Hz: 0.20 → 0.08 (-60%, ほぼ消音)
+      - amp +60% の全体引き上げにも関わらず 4kHz 以上は実測 mag が減少 = lowpass の決定的証拠
+      - 1-pole 6dB/oct 理論と実測の傾斜がよく整合
+      - 「シャラシャラ」の不快な高域がカットされ「柔らかい雨音」感が出る音響的成功
+
+## Task 13 — 音質アップ第 5 弾: 倍音追加（第2 + 第3 倍音で楽器的温かみ）
+
+- [x] Phase 1: ToneRenderState に HarmonicVoice 構造体 + harmonics 配列追加
+      - struct HarmonicVoice { ratio, amplitudeFactor, phaseIncrementLeft/Right, phaseLeft/Right }
+      - var harmonics: [HarmonicVoice] (audio thread 単一所有)
+      - init で baseInc × ratio で倍音 phaseIncrement を計算 → L/R detune 比率も自動継承
+        (第 2 倍音では L/R 差が基音の 2 倍 = ビート周期も 1/2)
+- [x] Phase 2: DroneGenerator render block に倍音合成を組み込み
+      - 基音 sin 計算後 for i in 0..<harmonicsCount で倍音 sin を加算
+      - 各倍音にも基音と同じ LFO modRatio を掛ける（楽器的に自然）
+      - 配列要素を var h = state.harmonics[i] でローカル取得して最後に書き戻し
+        (subscript uniqueness check を read+write 2 回に抑える最適化)
+- [x] Phase 3: AudioEngineController で 3 声に倍音指定
+      - 全 3 声に harmonics: [(2.0, 0.2), (3.0, 0.1)] (第2倍音=20%、第3倍音=10%)
+      - Headroom 再計算: 0.28 × 1.3 = 0.364 + Noise 0.08 → mainMixer 0.5 で 0.22 実効
+      - 偶数 + 奇数の組み合わせで「ハーモニウム/オルガン系」の温かみを想定
+- [x] Phase 4: Codex レビュー
+      - Critical/High/Medium 全てなし、一発 OK
+      - Low 改善提案「ローカル変数取得 + 最後書き戻し」を反映（コード意図も明確化）
+- [ ] Phase 5: push → Codemagic → artifacts_014 で倍音化を実証
+      - 期待: WAV stereo 維持、L/R 検査クリア、crash 無し
+      - Goertzel で倍音ピーク出現:
+        - 220 基音 → 440 / 660 のピーク
+        - 330 基音 → 660 / 990 のピーク
+        - 440 基音 → 880 / 1320 のピーク
+        - 220 の第 2 倍音 (440) と 3 声 Drone のオクターブ声 (440) が重なって 440Hz が特に強くなる
+      - クリッピング無し（peak 上限 0.22 実効で 16bit 余裕）
