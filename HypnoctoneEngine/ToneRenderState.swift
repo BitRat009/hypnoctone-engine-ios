@@ -3,21 +3,16 @@ import Atomics
 
 /// 1 つの倍音（harmonic partial）の状態。基音に対する周波数比と振幅係数、
 /// および L/R 別の位相情報を保持する。`ToneRenderState.harmonics` 配列の要素として使われる。
-/// 倍音は基音と同じ LFO modRatio で揺らされるので、ここでは modRatio 後の値ではなく
-/// **LFO 中立時の基準** phaseIncrement を保持する（DroneGenerator render block が
-/// ブロック単位で modRatio を掛ける）。
+///
+/// 倍音の phaseIncrement は **render block 内で `基音 phaseIncrement × ratio × lfoMod` として
+/// 都度計算**する。これにより Task 16 の generative pitch (setFrequency による glide で
+/// 基音 phaseIncrement が動く) にも倍音が自動連動する。
 struct HarmonicVoice {
     /// 基音に対する周波数比（2.0 = 第 2 倍音、3.0 = 第 3 倍音）。
     let ratio: Double
 
     /// 基音振幅に対する相対振幅（0.2 なら基音の 20%）。
     let amplitudeFactor: Float
-
-    /// L チャネル用の 1 サンプル位相増分（LFO 中立時）。
-    let phaseIncrementLeft: Double
-
-    /// R チャネル用の 1 サンプル位相増分（LFO 中立時）。
-    let phaseIncrementRight: Double
 
     /// L チャネルの現在位相（audio thread が単一所有で更新）。
     var phaseLeft: Double
@@ -120,16 +115,34 @@ final class ToneRenderState {
     /// 2π（位相の1周）。
     let twoPi: Double = 2.0 * Double.pi
 
-    /// L チャネル用の 1 サンプル位相増分（ラジアン）。**LFO 中立時の基準値**。
-    /// LFO 有効時、render block 先頭で `phaseIncrementLeft * lfoModRatio` を計算して
-    /// そのブロック内のサンプル進行に使う。
-    let phaseIncrementLeft: Double
-
-    /// R チャネル用の 1 サンプル位相増分（ラジアン）。**LFO 中立時の基準値**。
-    let phaseIncrementRight: Double
+    /// L/R detune の cent 値。setFrequency 時に L/R 別 phaseIncrement を再計算するため保持。
+    let detuneCents: Double
 
     /// 定常状態の基本振幅。
     let defaultAmplitude: Float
+
+    // MARK: - Audio thread 単一所有 — current pitch（glide 中に書き換わる）
+
+    /// L チャネル用の 1 サンプル位相増分（ラジアン、**LFO 中立時**）。
+    /// Task 16 から var: setFrequency による glide で audio thread がサンプル単位で
+    /// `targetPhaseIncrementLeft` に向けて補間する。LFO mod は render block で別途乗算。
+    var phaseIncrementLeft: Double
+
+    /// R チャネル用の 1 サンプル位相増分（ラジアン、**LFO 中立時**）。
+    var phaseIncrementRight: Double
+
+    /// Glide target（音名切替先の phaseIncrement）。audio thread 単一所有。
+    /// pending pitch command を seqlock で consume したときに pending から転記される。
+    var targetPhaseIncrementLeft: Double
+
+    /// Glide target（R チャネル）。
+    var targetPhaseIncrementRight: Double
+
+    /// Glide の残りフレーム数。> 0 の間サンプル単位で phaseIncrement を target に近づける。
+    var glideFramesRemaining: Int = 0
+
+    /// 最後に consume した `pendingPitchGeneration` の値（pitch 用 odd/even seqlock）。
+    var lastConsumedPitchGeneration: Int = 0
 
     // MARK: - LFO（pitch vibrato）— 定数
 
@@ -204,6 +217,22 @@ final class ToneRenderState {
     /// `lastConsumedGeneration` と違ったら新しいコマンドがあると判断する。
     let pendingGeneration = ManagedAtomic<Int>(0)
 
+    // MARK: - Main writer / Audio reader（pitch command, 全 atomic）— Task 16
+
+    /// 次の pitch glide target の L チャネル phaseIncrement（Double の bitPattern を保持）。
+    /// fade とは独立した odd/even seqlock で publish される。
+    let pendingTargetPhaseIncrementLeftBits = ManagedAtomic<UInt64>(0)
+
+    /// 次の pitch glide target の R チャネル phaseIncrement（Double bitPattern）。
+    let pendingTargetPhaseIncrementRightBits = ManagedAtomic<UInt64>(0)
+
+    /// Glide に使うフレーム数。0 で即時切替。
+    let pendingGlideFrames = ManagedAtomic<Int>(0)
+
+    /// pitch コマンドの世代番号。fade 用の `pendingGeneration` とは別の odd/even seqlock。
+    /// 同じパターン: writer は .acquiringAndReleasing で odd → payload store → .releasing で even。
+    let pendingPitchGeneration = ManagedAtomic<Int>(0)
+
     // MARK: - 初期化
 
     /// - Parameters:
@@ -242,6 +271,7 @@ final class ToneRenderState {
     ) {
         self.frequency = frequency
         self.sampleRate = sampleRate
+        self.detuneCents = detuneCents
         self.defaultAmplitude = defaultAmplitude
 
         // cent → 周波数比: ratio = 2^(cents/1200)
@@ -251,8 +281,13 @@ final class ToneRenderState {
         self.frequencyLeft = frequency * ratioLow
         self.frequencyRight = frequency * ratioHigh
 
-        self.phaseIncrementLeft = twoPi * frequencyLeft / sampleRate
-        self.phaseIncrementRight = twoPi * frequencyRight / sampleRate
+        let initialIncLeft = twoPi * frequencyLeft / sampleRate
+        let initialIncRight = twoPi * frequencyRight / sampleRate
+        self.phaseIncrementLeft = initialIncLeft
+        self.phaseIncrementRight = initialIncRight
+        // glide target は初期値として同じ値を入れる (glide=0 で即定常)
+        self.targetPhaseIncrementLeft = initialIncLeft
+        self.targetPhaseIncrementRight = initialIncRight
 
         // LFO 計算: period > 0 のとき有効、それ以外は increment=0 で実質無効化。
         self.lfoDepthCents = lfoDepthCents
@@ -263,17 +298,14 @@ final class ToneRenderState {
         }
         self.lfoPhase = lfoInitialPhase
 
-        // 倍音群を構築: 各倍音の L/R phaseIncrement は基音の phaseIncrement × ratio。
-        // L/R detune は基音で既に決まっているので、倍音は ratio 倍するだけで自動的に
-        // L/R 間距離が ratio 倍に広がる（第 2 倍音なら detune も 2 倍 → ビート周期 1/2）。
-        let baseIncL = self.phaseIncrementLeft
-        let baseIncR = self.phaseIncrementRight
+        // 倍音群を構築: ratio と amplitudeFactor のみ保持。
+        // 倍音の L/R phaseIncrement は render block 内で「基音 phaseIncrement × ratio × lfoMod」
+        // として都度計算するので、ここでは固定計算しない（Task 16 で setFrequency 時に
+        // 基音 phaseIncrement が動くのに倍音も自動連動するため）。
         self.harmonics = harmonics.map { h in
             HarmonicVoice(
                 ratio: h.ratio,
                 amplitudeFactor: h.amplitudeFactor,
-                phaseIncrementLeft: baseIncL * h.ratio,
-                phaseIncrementRight: baseIncR * h.ratio,
                 phaseLeft: 0.0,
                 phaseRight: 0.0
             )

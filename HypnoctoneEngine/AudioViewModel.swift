@@ -36,10 +36,15 @@ final class AudioViewModel: ObservableObject {
     var scaleName: String { controller.scale.shortName }
 
     /// 現在鳴っている Drone 3 声の note 名（["A3", "E4", "A4"]）。UI 表示用。
-    /// Task 15 段階では固定。Step 2 で generative に切り替わると時間軸で変化する。
-    var droneNoteNames: [String] { controller.droneNotes.map(\.name) }
+    /// Task 16 から generative pitch selection で時間軸に変化する。
+    /// `controller.currentDroneNotes` は @Published で、init で objectWillChange を
+    /// forward しているので変化が UI に自動反映される。
+    var droneNoteNames: [String] { controller.currentDroneNotes.map(\.name) }
 
     private let controller: AudioEngineController
+
+    /// `controller.objectWillChange` を `self.objectWillChange` に forward するための保持。
+    private var cancellables: Set<AnyCancellable> = []
 
     /// - Parameter controller: 音響処理コントローラ。テスト時に差し替えられるよう注入可能。
     ///
@@ -51,6 +56,16 @@ final class AudioViewModel: ObservableObject {
         let resolved = controller ?? AudioEngineController()
         self.controller = resolved
         resolved.setVolume(Float(volume))
+
+        // controller の @Published 変化 (currentDroneNotes 等) を ViewModel にも forward。
+        // これで MainView の musicInfo (droneNoteNames を読む) が generative pitch 変化を
+        // 自動的に再描画する。
+        resolved.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
 
     /// 再生 / 停止をトグルする。

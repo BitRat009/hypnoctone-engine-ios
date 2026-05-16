@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import os
 
 /// UI から音響処理を分離するためのコントローラ。
@@ -40,7 +41,7 @@ import os
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
-final class AudioEngineController {
+final class AudioEngineController: ObservableObject {
 
     // MARK: - 動作モード
 
@@ -67,9 +68,26 @@ final class AudioEngineController {
     /// 現在のスケール (将来の generative pitch selection で参照)。
     let scale: Scale
 
-    /// 現在鳴っている Drone 3 声の note 群（UI 表示用）。
-    /// [root, root+7 (5th), root+12 (octave)] の順。
-    let droneNotes: [Note]
+    /// 現在鳴っている Drone 3 声の note 群（UI 表示用、Task 16 から動的に変化）。
+    /// 初期値は [root, root+7 (5th), root+12 (octave)]。PitchScheduler が時間軸で
+    /// 候補リストから選び直すたびに更新される。
+    @Published private(set) var currentDroneNotes: [Note]
+
+    // MARK: - PitchScheduler (Task 16: ATMÓS 化 Step 2 — generative pitch selection)
+
+    /// 各 voice の note 候補リスト。PitchScheduler がここから「現在 note を除いた」中から
+    /// ランダム選択する。3 voices (root / 5th / octave) × 4 候補。Scale 内に収める設計。
+    private let pitchCandidates: [[Note]]
+
+    /// 各 voice の pitch 切替 interval（秒）。素数寄りで揃わない（Task 11 LFO と同じ思想）。
+    /// CI (offlineToWAV) モードでは × 0.1 にして 4 秒 WAV 内で 2-3 回切替を観測できるようにする。
+    private let pitchIntervals: [Double] = [19.0, 23.0, 13.0]
+
+    /// Pitch 切替の glide 時間（秒）。realtime は 3 秒の遅い補間、CI は 0.5 秒で速く確認。
+    private let pitchGlideSeconds: Double
+
+    /// 各 voice 独立の pitch 更新 Task（start で起動、stop で cancel）。
+    private var pitchUpdateTasks: [Task<Void, Never>] = []
 
     // MARK: - 内部プロパティ
 
@@ -138,9 +156,28 @@ final class AudioEngineController {
     ) {
         self.rootNote = rootNote
         self.scale = scale
-        // 3 声構成: root / root+7semi (5度) / root+12semi (octave)
+        // 3 声構成: root / root+7semi (5度) / root+12semi (octave)。これが起動時の初期 note。
         let droneIntervals = [0, 7, 12]
-        self.droneNotes = droneIntervals.map { Note(midiNumber: rootNote.midiNumber + $0) }
+        let initialDroneNotes = droneIntervals.map { Note(midiNumber: rootNote.midiNumber + $0) }
+        self.currentDroneNotes = initialDroneNotes
+
+        // Pitch 候補リスト: 各 voice の音域を保ったまま Scale 内 (A Major Pentatonic) からランダム選択する。
+        // ATMÓS 観察と同じ「voice ごとの音域固定 + 候補内で動的選択」設計。
+        // A Major Pentatonic = A, B, C#, E, F# の 5 音から各 voice の音域内 4 つを抜粋。
+        //
+        // **Step 2 制約**: `rootNote` (default A3) と `scale` (default majorPentatonic) を
+        // 公開 init で受けているが、現状この候補リストは A3 + majorPentatonic 固定で
+        // ベタ書きしている。別 root/scale を渡すと初期 droneNotes と候補リストのキーが
+        // ずれるので注意。将来 Step 2.5+ で `Scale.notes(root:octaves:)` と音域フィルタで
+        // 動的構築に切り替える予定 (Codex Task 16 Medium 指摘)。
+        self.pitchCandidates = [
+            // root voice (中音域: A3 周辺)
+            ["A3", "B3", "C#4", "E4"].compactMap(Note.init(name:)),
+            // 5th voice (中高音域: E4 周辺)
+            ["E4", "F#4", "A4", "B4"].compactMap(Note.init(name:)),
+            // octave voice (高音域: A4 周辺)
+            ["A4", "B4", "C#5", "E5"].compactMap(Note.init(name:)),
+        ]
         let resolvedMode: Mode
         if let mode = mode {
             resolvedMode = mode
@@ -150,6 +187,8 @@ final class AudioEngineController {
                 : .realtime
         }
         self.mode = resolvedMode
+        // CI モードでは glide も短く（0.5s）、realtime は 3s の落ち着いた補間。
+        self.pitchGlideSeconds = resolvedMode == .offlineToWAV ? 0.5 : 3.0
 
         // 2ch (stereo) / 44.1kHz / Float32 標準フォーマット。
         // Task 10 で stereo 化: 各 Drone は L/R で detune したサイン波、Noise は L/R 独立 PRNG。
@@ -193,11 +232,11 @@ final class AudioEngineController {
         let envelopeDepth: Float = 0.075
         let envelopeInitialPhase: Double = 0.0
 
-        // droneNotes[0] = root, [1] = 5度, [2] = octave。それぞれの frequency は Note が
-        // 平均律 (12 TET) で計算する (A3=220Hz, E4=329.63Hz, A4=440Hz)。
+        // initialDroneNotes[0]=root, [1]=5度, [2]=octave。各 frequency は Note が
+        // 平均律 (12 TET) で計算 (A3=220Hz, E4=329.63Hz, A4=440Hz)。
         self.droneGenerators = [
             DroneGenerator(
-                format: format, frequency: self.droneNotes[0].frequency,
+                format: format, frequency: initialDroneNotes[0].frequency,
                 lfoPeriodSeconds: 17.3, lfoDepthCents: 2.5, lfoInitialPhase: 0.0,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -205,7 +244,7 @@ final class AudioEngineController {
                 defaultAmplitude: 0.15
             ),
             DroneGenerator(
-                format: format, frequency: self.droneNotes[1].frequency,
+                format: format, frequency: initialDroneNotes[1].frequency,
                 lfoPeriodSeconds: 23.1, lfoDepthCents: 2.0, lfoInitialPhase: .pi / 2,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -213,7 +252,7 @@ final class AudioEngineController {
                 defaultAmplitude: 0.08
             ),
             DroneGenerator(
-                format: format, frequency: self.droneNotes[2].frequency,
+                format: format, frequency: initialDroneNotes[2].frequency,
                 lfoPeriodSeconds: 13.7, lfoDepthCents: 1.5, lfoInitialPhase: .pi,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -288,6 +327,7 @@ final class AudioEngineController {
         let myGeneration = stopGeneration
 
         scheduleFadeOut()
+        stopPitchScheduler()
 
         pendingStopTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
@@ -348,6 +388,7 @@ final class AudioEngineController {
         }
 
         scheduleFadeIn()
+        startPitchScheduler()
         return true
     }
 
@@ -385,6 +426,54 @@ final class AudioEngineController {
             drone.scheduleFadeOut(duration: fadeOutSeconds)
         }
         noiseGenerator.scheduleFadeOut(duration: fadeOutSeconds)
+    }
+
+    // MARK: - PitchScheduler (Task 16)
+
+    /// 各 voice 用に独立した Task を起動し、interval ごとに `advanceVoicePitch(at:)` を呼ぶ。
+    /// realtime モード専用。offline モードでは render ループ内で frame counter で代替する
+    /// （Task.sleep は renderOffline 同期ループ中に進まないため）。
+    private func startPitchScheduler() {
+        guard mode == .realtime else { return }
+        stopPitchScheduler()
+        for i in 0..<droneGenerators.count {
+            let interval = pitchIntervals[i]
+            let task = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    } catch {
+                        return  // cancel された
+                    }
+                    guard let self = self, !Task.isCancelled else { return }
+                    self.advanceVoicePitch(at: i)
+                }
+            }
+            pitchUpdateTasks.append(task)
+        }
+        logger.info("PitchScheduler 起動 (\(self.pitchIntervals.count) voices)")
+    }
+
+    /// 全 voice の pitch 更新 Task を cancel して配列をクリア。
+    private func stopPitchScheduler() {
+        for task in pitchUpdateTasks {
+            task.cancel()
+        }
+        pitchUpdateTasks.removeAll()
+    }
+
+    /// 指定 voice の次の pitch を「現在 note を除く候補から」ランダム選択し、generator に
+    /// setFrequency(glideSeconds:) で渡す。`currentDroneNotes[i]` も更新して @Published 経由
+    /// で UI 通知。
+    private func advanceVoicePitch(at i: Int) {
+        guard i < pitchCandidates.count, i < droneGenerators.count else { return }
+        let candidates = pitchCandidates[i]
+        let current = currentDroneNotes[i]
+        let alternatives = candidates.filter { $0 != current }
+        guard let next = alternatives.randomElement() else { return }
+        droneGenerators[i].setFrequency(next.frequency, glideSeconds: pitchGlideSeconds)
+        currentDroneNotes[i] = next
+        logger.info("Voice[\(i)] pitch: \(current.name, privacy: .public) → \(next.name, privacy: .public)")
     }
 
     // MARK: - offline render
@@ -473,11 +562,29 @@ final class AudioEngineController {
         var zeroFrameRetries = 0
         let maxZeroFrameRetries = 8
 
+        // ---- inline PitchScheduler (offline 専用、Task 16) ----
+        // CI モードでは pitchIntervals は本来 19/23/13s だが、4 秒 WAV では発火しない。
+        // ×0.1 = 1.9/2.3/1.3s で 4 秒 WAV 内に 2-3 回発火させて generative 効果を CI で実証。
+        // realtime Task scheduler は startOfflineRender 内では使えない (同期ループで sleep 不可)。
+        let offlinePitchScale = 0.1
+        let pitchUpdateFrameIntervals: [AVAudioFrameCount] = pitchIntervals.map {
+            AVAudioFrameCount(renderSampleRate * $0 * offlinePitchScale)
+        }
+        var nextPitchUpdateFrames: [AVAudioFrameCount] = pitchUpdateFrameIntervals
+
         while rendered < totalFrames {
             // fade-out 開始地点を越えたら一度だけ scheduleFadeOut。
             if !fadeOutScheduled && rendered >= fadeOutStartFrame {
                 scheduleFadeOut()
                 fadeOutScheduled = true
+            }
+
+            // inline PitchScheduler: 各 voice の次の update frame を越えたら advance。
+            for i in 0..<droneGenerators.count {
+                if rendered >= nextPitchUpdateFrames[i] {
+                    advanceVoicePitch(at: i)
+                    nextPitchUpdateFrames[i] += pitchUpdateFrameIntervals[i]
+                }
             }
 
             let remaining = totalFrames - rendered

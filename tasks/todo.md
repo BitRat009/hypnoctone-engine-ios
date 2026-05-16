@@ -398,3 +398,48 @@ Step 3 で SUB、Step 4 で GRAIN、Step 5 で 4 モードに進む計画。
       - 手動 Goertzel target 更新: 220 / 329.6276 / 440 Hz (E4 は平均律で 329.63)
       - 純正律→平均律変更による「うねり」程度を観察（LFO/envelope で隠れる想定）
       - MainView の音名表示 (Scale A3 MajPentatonic / A3 · E4 · A4) がスクリーンショットに出る
+
+[Task 15 Phase 5 完了結果 — 末尾の "[ ] Phase 5" は historical で、以下が実測]
+
+      ✓ WAV stereo / 4.09s / L/R 検査クリア / crash 無し (pid 1784)
+      ✓ **Goertzel で平均律変更を完全実証**:
+        - 220Hz (A3): 2286 → 2345 (+3%、平均律と同周波数なので変化なし)
+        - 329.63Hz (E4 平均律): 222 → 1134 (× 5.1、主ピークが移動)
+        - 330Hz (旧純正律): 1112 → 713 (-36%、0.37Hz ずれて検出減衰)
+        - 440Hz (A4): 223 → 226 (維持)
+      ✓ MainView UI screenshot で "Scale A3 MajPentatonic" + "A3 · E4 · A4" 表示確認
+      ✓ minimal UI コンセプトを壊さず情報を統合
+
+## Task 16 — ATMÓS 化 Step 2: Generative Pitch Selection
+
+各 Drone 声の周波数を時間軸で動的に切り替える。glide で滑らかに遷移、各 voice が
+独立 interval (素数寄り)、候補リストから現在以外をランダム選択。UI も自動更新。
+
+- [x] Phase 1: DroneGenerator に setFrequency(_:, glideSeconds:) 追加
+      - ToneRenderState 拡張: detuneCents 保持、phaseIncrement を var に、glide target 追加
+      - 新規 pitch 用 atomic seqlock (fade とは独立): pendingTargetPhaseIncrementL/R Bits (UInt64),
+        pendingGlideFrames, pendingPitchGeneration (odd/even)
+      - HarmonicVoice から phaseIncrement 削除 → render block で「基音 × ratio × lfoMod」都度計算
+        (glide で基音が動くと倍音も自動連動)
+      - render block: pitch seqlock consume + per-sample 線形補間 (target - current) / glideFrames
+      - DroneGenerator.setFrequency: detuneCents を使って L/R 別 phaseIncrement 再計算 + atomic publish
+- [x] Phase 2: PitchScheduler を AudioEngineController に統合
+      - ObservableObject 化、@Published currentDroneNotes
+      - pitchCandidates 3 voices × 4 候補 (A Major Pentatonic 固定、Step 2.5 で汎用化予定)
+      - pitchIntervals [19, 23, 13]s (素数寄り)、pitchGlideSeconds (realtime 3s / CI 0.5s)
+      - startPitchScheduler (realtime 専用 Task ベース) / stopPitchScheduler / advanceVoicePitch
+      - offline render ループに inline frame counter scheduler (× 0.1 interval = 1.9/2.3/1.3s)
+- [x] Phase 3: AudioViewModel objectWillChange forward
+      - cancellables: Set<AnyCancellable> 追加
+      - controller.objectWillChange.sink で self.objectWillChange.send() forward (DispatchQueue.main 経由)
+      - droneNoteNames を controller.currentDroneNotes ベースに変更
+- [x] Phase 4: Codex レビュー
+      - Critical 1 件: import Combine 欠落でビルドエラー → 即修正
+      - Medium 1 件: pitchCandidates の rootNote/scale 制約 → コメント明示で反映
+      - 最終 OK
+- [ ] Phase 5: push → CI 検証 (artifacts_017)
+      - 期待: WAV stereo/4.09s 維持、L/R 検査クリア、crash 無し
+      - **本命**: Goertzel で複数候補 note (220/247/277/330 等) のエネルギー分散観測
+        - 静的単一ピーク → 動的複数ピーク = generative の証拠
+      - UI screenshot: 起動時 A3·E4·A4 / 後の screenshot で異なる音名
+      - クリッピング無し、glide で位相連続維持

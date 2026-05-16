@@ -150,6 +150,30 @@ final class DroneGenerator {
             // g1 が odd の場合: writer が今まさに書き込み中。
             // active 据え置きで次ブロックの retry に任せる。
 
+            // ---- pending pitch command を odd/even seqlock で consume (Task 16) ----
+            //
+            // fade と同じ atomic seqlock パターンで、setFrequency() が main thread から
+            // publish した「新しい target phaseIncrement (L/R) + glide frames」を取り込む。
+            // fade 用 seqlock とは独立した pendingPitchGeneration を使うので相互干渉なし。
+            let p1 = state.pendingPitchGeneration.load(ordering: .acquiring)
+            if p1 & 1 == 0 && p1 != state.lastConsumedPitchGeneration {
+                let newTargetIncLBits = state.pendingTargetPhaseIncrementLeftBits.load(ordering: .relaxed)
+                let newTargetIncRBits = state.pendingTargetPhaseIncrementRightBits.load(ordering: .relaxed)
+                let newGlideFrames = state.pendingGlideFrames.load(ordering: .relaxed)
+                let p2 = state.pendingPitchGeneration.load(ordering: .acquiring)
+                if p1 == p2 {
+                    state.targetPhaseIncrementLeft = Double(bitPattern: newTargetIncLBits)
+                    state.targetPhaseIncrementRight = Double(bitPattern: newTargetIncRBits)
+                    state.glideFramesRemaining = newGlideFrames
+                    state.lastConsumedPitchGeneration = p1
+                    // glide=0 (即時切替) のときは current を即 target に揃える。
+                    if newGlideFrames == 0 {
+                        state.phaseIncrementLeft = state.targetPhaseIncrementLeft
+                        state.phaseIncrementRight = state.targetPhaseIncrementRight
+                    }
+                }
+            }
+
             // ---- LFO （pitch vibrato）modRatio をブロック先頭で 1 回計算 ----
             //
             // 1 サンプル単位で sin/pow を呼ぶと audio thread 負荷が上がるので、
@@ -187,12 +211,16 @@ final class DroneGenerator {
 
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             //
-            // 基準 phaseIncrement に LFO modRatio を乗算してブロック内で使う。
-            // phase（位相）自体は連続なので、modRatio がブロック境界で変わっても
-            // クリックノイズは出ない（位相の進み速度だけが滑らかに変わる）。
-            let phaseIncrementLeft = state.phaseIncrementLeft * lfoMod
-            let phaseIncrementRight = state.phaseIncrementRight * lfoMod
+            // 基準 phaseIncrement (L/R) を glide で target に向けて per-sample 線形補間する。
+            // LFO modRatio は補間後の値に乗算してブロック内で使う。
+            // 倍音 phaseIncrement は「基音 (glide 後) × ratio × lfoMod」で都度計算 (Task 16)。
+            // phase（位相）自体は連続なので、phaseIncrement が変わってもクリックノイズは出ない。
             let twoPi = state.twoPi
+            var phaseIncBaseL = state.phaseIncrementLeft
+            var phaseIncBaseR = state.phaseIncrementRight
+            let targetIncL = state.targetPhaseIncrementLeft
+            let targetIncR = state.targetPhaseIncrementRight
+            var glideFrames = state.glideFramesRemaining
             var phaseLeft = state.phaseLeft
             var phaseRight = state.phaseRight
             var amplitude = state.currentAmplitude
@@ -217,6 +245,20 @@ final class DroneGenerator {
                     amplitude = target
                 }
 
+                // Pitch glide: 基音 phaseIncrement を target に向けて 1 サンプル分近づける。
+                if glideFrames > 0 {
+                    let stepL = (targetIncL - phaseIncBaseL) / Double(glideFrames)
+                    let stepR = (targetIncR - phaseIncBaseR) / Double(glideFrames)
+                    phaseIncBaseL += stepL
+                    phaseIncBaseR += stepR
+                    glideFrames -= 1
+                } else {
+                    phaseIncBaseL = targetIncL
+                    phaseIncBaseR = targetIncR
+                }
+                let phaseIncrementLeft = phaseIncBaseL * lfoMod
+                let phaseIncrementRight = phaseIncBaseR * lfoMod
+
                 // 基音サイン波を生成。
                 var sampleL = Float(sin(phaseLeft)) * amplitude
                 var sampleR = Float(sin(phaseRight)) * amplitude
@@ -226,14 +268,12 @@ final class DroneGenerator {
                 phaseRight += phaseIncrementRight
                 if phaseRight >= twoPi { phaseRight -= twoPi }
 
-                // 倍音を加算合成。各倍音にも LFO modRatio を同じく掛ける（楽器的に自然）。
-                // 要素を一度ローカル var に取り出して最後に書き戻すことで配列の
-                // subscript uniqueness check を 1 iteration あたり read+write の 2 回に抑える
-                // （将来倍音数を増やしても線形に効く改善）。
+                // 倍音を加算合成: phaseIncrement は基音 (glide 後) × ratio × lfoMod。
+                // 基音 phaseIncrement に追従するので、glide で基音が動くと倍音も自動連動する。
                 for i in 0..<harmonicsCount {
                     var h = state.harmonics[i]
-                    let hIncL = h.phaseIncrementLeft * lfoMod
-                    let hIncR = h.phaseIncrementRight * lfoMod
+                    let hIncL = phaseIncrementLeft * h.ratio
+                    let hIncR = phaseIncrementRight * h.ratio
                     let hAmp = amplitude * h.amplitudeFactor
 
                     sampleL += Float(sin(h.phaseLeft)) * hAmp
@@ -276,6 +316,9 @@ final class DroneGenerator {
 
             state.phaseLeft = phaseLeft
             state.phaseRight = phaseRight
+            state.phaseIncrementLeft = phaseIncBaseL
+            state.phaseIncrementRight = phaseIncBaseR
+            state.glideFramesRemaining = glideFrames
             state.currentAmplitude = amplitude
             state.activeFadeFramesRemaining = framesRemaining
             state.lfoPhase = lfoPhase
@@ -322,6 +365,43 @@ final class DroneGenerator {
         // end marker（even）は .releasing。これで reader が payload を取りに来る。
         let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Drone fade-out scheduled: target=0 frames=\(frames) gen=\(newGen)")
+    }
+
+    // MARK: - Pitch glide スケジュール（Task 16, odd/even seqlock writer）
+
+    /// 基音周波数を変更し、`glideSeconds` 秒かけて新 frequency に線形補間する。
+    /// 倍音 phaseIncrement は render block 内で「新基音 phaseIncrement × ratio」として
+    /// 自動連動するため、ここで個別に更新する必要は無い。L/R は init で受けた `detuneCents`
+    /// に基づいて再計算され、左右の detune 関係は維持される。
+    ///
+    /// プロトコル: pitch 用 odd/even seqlock（fade 用とは独立した別 generation）。
+    ///   1. pendingPitchGeneration を **.acquiringAndReleasing** で odd に
+    ///   2. target phaseIncrement L/R + glide frames を relaxed store
+    ///   3. pendingPitchGeneration を **.releasing** で even に → audio thread が consume
+    ///
+    /// - Parameters:
+    ///   - frequency: 新しい基音周波数 (Hz, 中心)。L/R は detune の半幅ずつ両側に振られる。
+    ///   - glideSeconds: 線形補間時間 (秒)。0 で即時切替（クリック回避は phase 連続維持で OK）。
+    func setFrequency(_ frequency: Double, glideSeconds: TimeInterval = 3.0) {
+        // L/R 別 phaseIncrement を再計算（detune は init 時の値を保持）。
+        let halfCents = renderState.detuneCents / 2.0
+        let ratioLow = pow(2.0, -halfCents / 1200.0)
+        let ratioHigh = pow(2.0, halfCents / 1200.0)
+        let freqL = frequency * ratioLow
+        let freqR = frequency * ratioHigh
+        let targetIncL = renderState.twoPi * freqL / sampleRate
+        let targetIncR = renderState.twoPi * freqR / sampleRate
+        let glideFrames = max(0, Int(sampleRate * glideSeconds))
+
+        // 1) writer 開始マーク (odd)
+        renderState.pendingPitchGeneration.wrappingIncrement(by: 1, ordering: .acquiringAndReleasing)
+        // 2) payload 書き込み (Double → UInt64 bitPattern)
+        renderState.pendingTargetPhaseIncrementLeftBits.store(targetIncL.bitPattern, ordering: .relaxed)
+        renderState.pendingTargetPhaseIncrementRightBits.store(targetIncR.bitPattern, ordering: .relaxed)
+        renderState.pendingGlideFrames.store(glideFrames, ordering: .relaxed)
+        // 3) writer 完了マーク (even)
+        let newGen = renderState.pendingPitchGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
+        logger.info("Drone pitch set: \(frequency, privacy: .public)Hz glide=\(glideSeconds, privacy: .public)s gen=\(newGen)")
     }
 
     // MARK: - 状態参照
