@@ -91,7 +91,11 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Phase 6: codemagic.yaml の duration 検証を >= 3.5s に
 - [x] Phase 7: Codex レビュー → 指摘 (1)(2)(3)(4) を反映
 - [x] Task 5 push → Codemagic 実走 → artifacts_004 で fade 形状を確認（生サンプル解析で線形減衰を実証、終端は完全無音）
-- [ ] 後続課題 (Codex 指摘 5): `controller.start()` を Bool 返却にして AudioViewModel が失敗時に isPlaying をロールバックする整合性改善（Task 5 のスコープ外）
+- [x] 後続課題 (Codex Task 5 指摘 5): `controller.start()` を `@discardableResult Bool` 返却に変更
+      - `startRealtime` / `startOfflineRender` も Bool 返却、各早期 return → `return false`
+      - `AudioViewModel.start()` で controller が成功時のみ isPlaying = true
+      - offline render の defer ログを成功/失敗で文言分け（renderSucceeded フラグ）
+      - Codex 簡易レビュー反映: @discardableResult のコメント精度修正 / defer ログ文言分け
 
 ## Task 6 — DroneGenerator 分離
 

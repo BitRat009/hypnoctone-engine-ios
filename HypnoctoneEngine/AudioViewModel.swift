@@ -49,9 +49,13 @@ final class AudioViewModel: ObservableObject {
     }
 
     /// 再生を開始する。fade-in は `AudioEngineController` 側で 0.8 秒かけて行われる。
+    /// `controller.start()` が成功した時のみ `isPlaying` を `true` にする。
+    /// `AVAudioSession` 有効化や `engine.start()` が失敗した場合は `isPlaying` を `false` の
+    /// まま維持し、UI と engine の整合性を保つ（Codex Task 5 レビュー指摘 5 への対応）。
     func start() {
-        controller.start()
-        isPlaying = true
+        if controller.start() {
+            isPlaying = true
+        }
     }
 
     /// 再生を停止する。fade-out 開始を依頼するが、UI 上は即時 Stopped 表示にする。

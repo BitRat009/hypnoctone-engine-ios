@@ -147,12 +147,17 @@ final class AudioEngineController {
 
     /// 再生を開始する（realtime: fade-in 開始、offline: fadeIn→定常→fadeOut の WAV を書く）。
     /// fade-out 中に呼ばれた場合は保留中の停止タスクを取り消し、現在地点から fade-in に切り替える。
-    func start() {
+    /// - Returns: 成功した場合 true、失敗した場合 false。
+    ///            呼び出し側（`AudioViewModel`）は false 時に `isPlaying` を up しないことで
+    ///            UI と engine の整合性を保つ。`@discardableResult` は将来「結果を見ない直接呼び出し」
+    ///            （ユニットテストなど）のために付けている。
+    @discardableResult
+    func start() -> Bool {
         switch mode {
         case .realtime:
-            startRealtime()
+            return startRealtime()
         case .offlineToWAV:
-            startOfflineRender()
+            return startOfflineRender()
         }
     }
 
@@ -207,13 +212,14 @@ final class AudioEngineController {
 
     /// `AVAudioSession` を有効化し、エンジンを realtime で開始し、fade-in を仕掛ける。
     /// 既に動作中（fade-out 中含む）なら保留 stop を取り消して fade-in を再仕掛けるだけ。
-    private func startRealtime() {
+    /// - Returns: 起動に成功した場合 true、`AVAudioSession` 有効化または `engine.start()` が失敗した場合 false。
+    private func startRealtime() -> Bool {
         // fade-out 中の再 start を受け取れるよう、保留 stop を取り消す。
         pendingStopTask?.cancel()
         pendingStopTask = nil
 
         if !isRunning {
-            guard configureAudioSession() else { return }
+            guard configureAudioSession() else { return false }
             do {
                 try engine.start()
                 isRunning = true
@@ -221,13 +227,14 @@ final class AudioEngineController {
             } catch {
                 isRunning = false
                 logger.error("AVAudioEngine の開始に失敗: \(error.localizedDescription, privacy: .public)")
-                return
+                return false
             }
         } else {
             logger.info("既に再生中 / fade-out 中。fade-in に切り替えます。")
         }
 
         scheduleFadeIn()
+        return true
     }
 
     /// fade-out 完了後の engine 停止と session 無効化。
@@ -263,10 +270,11 @@ final class AudioEngineController {
 
     /// engine を manual rendering で start し、fade-in → 定常 → fade-out の WAV を書き出す。
     /// AVAudioSession は触らない（CoreAudio HAL を回避するため）。
-    private func startOfflineRender() {
+    /// - Returns: WAV を最後まで書ききった場合 true、途中失敗時 false。
+    private func startOfflineRender() -> Bool {
         guard manualRenderingActive else {
             logger.error("manual rendering が有効化されていないため offline render を中止します。")
-            return
+            return false
         }
 
         do {
@@ -275,13 +283,19 @@ final class AudioEngineController {
             logger.info("AVAudioEngine を offline で開始しました。")
         } catch {
             logger.error("AVAudioEngine の offline 開始に失敗: \(error.localizedDescription, privacy: .public)")
-            return
+            return false
         }
 
+        // 成功 / 中断のどちらでも engine は止める。defer 内で文言を分けるため flag を保持。
+        var renderSucceeded = false
         defer {
             engine.stop()
             isRunning = false
-            logger.info("offline render が完了しました。")
+            if renderSucceeded {
+                logger.info("offline render が正常に完了しました。")
+            } else {
+                logger.error("offline render が途中中断のまま engine を停止しました。")
+            }
         }
 
         // 0 秒地点で fade-in を仕掛ける。
@@ -290,7 +304,7 @@ final class AudioEngineController {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         guard let outputURL = documentsURL?.appendingPathComponent("drone.wav") else {
             logger.error("Documents ディレクトリの解決に失敗しました。")
-            return
+            return false
         }
         // 古いファイルが残っていると AVAudioFile init が EXIST で失敗するので消す。
         try? FileManager.default.removeItem(at: outputURL)
@@ -314,7 +328,7 @@ final class AudioEngineController {
             )
         } catch {
             logger.error("AVAudioFile の生成に失敗: \(error.localizedDescription, privacy: .public)")
-            return
+            return false
         }
 
         guard let buffer = AVAudioPCMBuffer(
@@ -322,7 +336,7 @@ final class AudioEngineController {
             frameCapacity: engine.manualRenderingMaximumFrameCount
         ) else {
             logger.error("AVAudioPCMBuffer の生成に失敗しました。")
-            return
+            return false
         }
 
         // fade-out 開始地点（総尺 - fade-out 秒数）。
@@ -355,7 +369,7 @@ final class AudioEngineController {
                         zeroFrameRetries += 1
                         if zeroFrameRetries >= maxZeroFrameRetries {
                             logger.error("renderOffline: frameLength=0 が連続 \(maxZeroFrameRetries) 回。中断。")
-                            return
+                            return false
                         }
                         continue
                     }
@@ -367,26 +381,28 @@ final class AudioEngineController {
                     transientRetries += 1
                     if transientRetries >= maxTransientRetries {
                         logger.error("renderOffline: cannotDoInCurrentContext が連続 \(maxTransientRetries) 回。中断。")
-                        return
+                        return false
                     }
                     continue
                 case .insufficientDataFromInputNode:
                     logger.error("renderOffline: insufficientDataFromInputNode で中断。")
-                    return
+                    return false
                 case .error:
                     logger.error("renderOffline: error で中断。")
-                    return
+                    return false
                 @unknown default:
                     logger.error("renderOffline: 未知のステータス \(status.rawValue) で中断。")
-                    return
+                    return false
                 }
             } catch {
                 logger.error("renderOffline / write 失敗: \(error.localizedDescription, privacy: .public)")
-                return
+                return false
             }
         }
 
         logger.info("WAV を書き出しました: \(outputURL.path, privacy: .public) (frames: \(rendered))")
+        renderSucceeded = true
+        return true
     }
 
     // MARK: - セットアップ
