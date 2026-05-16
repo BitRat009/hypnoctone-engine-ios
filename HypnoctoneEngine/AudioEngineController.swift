@@ -4,18 +4,21 @@ import os
 /// UI から音響処理を分離するためのコントローラ。
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
-/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` に委譲する。
+/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator`（持続音）と
+/// `NoiseGenerator`（ピンクノイズ）に委譲し、`mainMixerNode` で並列ミックスする。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
 /// ## 想定する呼び出しスレッド
 /// クラス全体を `@MainActor` で隔離し、`start()` / `stop()` / `setVolume(_:)` を含む
 /// 全 public/internal メソッドはメインスレッドからのみ呼ぶ。render block のみ
-/// オーディオスレッドで動くが、render block 内では `DroneGenerator` の内部 state を
+/// オーディオスレッドで動くが、render block 内では各 generator の内部 state を
 /// 直接読み書きするだけで本クラスのメソッドは呼ばない。
 ///
-/// ## フェード（Task 5）
+/// ## フェード（Task 5 / Task 8）
 /// `start()` で 0.8 秒の fade-in、`stop()` で 0.8 秒の fade-out を行う。
-/// 補間ロジックは `DroneGenerator` の render block 内。`stop()` は fade-out 完了まで
+/// fade は `DroneGenerator` と `NoiseGenerator` の両方に同期的に仕掛ける
+/// （UX 上 Sleep モード全体の fade として揃える）。
+/// 補間ロジックは各 generator の render block 内。`stop()` は fade-out 完了まで
 /// 待ってから engine を止めるため `Task { @MainActor in ... }` を内部で起動し、
 /// `Task.sleep(0.8s)` 後に engine.stop()。fade-out 中に `start()` が呼ばれた場合は
 /// 保留中の停止タスクを取り消す。Stop 連打時のレース対策として世代番号
@@ -24,7 +27,8 @@ import os
 /// ## CI モード
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
-/// 「fade-in → 定常 → fade-out」を含む WAV を Documents/drone.wav に書き出す。
+/// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sleep-mix.wav に書き出す。
+/// WAV には Drone（220Hz サイン波）+ Noise（ピンクノイズ）が mixer でミックスされた状態が記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
@@ -36,7 +40,7 @@ final class AudioEngineController {
     enum Mode {
         /// リアルタイムでスピーカに出力する通常モード。
         case realtime
-        /// CoreAudio HAL を一切触らず offline で render し、Documents/drone.wav に書く。
+        /// CoreAudio HAL を一切触らず offline で render し、Documents/sleep-mix.wav に書く。
         case offlineToWAV
     }
 
@@ -54,8 +58,11 @@ final class AudioEngineController {
     private let engine = AVAudioEngine()
 
     /// Sleep モード基底音を担う Drone（持続音）生成器。
-    /// 将来 NoiseGenerator / SlowModulator 等を mainMixerNode に並べる土台。
     private let droneGenerator: DroneGenerator
+
+    /// Sleep モードで Drone に重ねるピンクノイズ生成器。
+    /// `mainMixerNode` で Drone と並列にミックスされる。
+    private let noiseGenerator: NoiseGenerator
 
     /// offline モードで manual rendering の有効化に成功したかどうか。
     /// false の場合、`startOfflineRender()` は CoreAudio HAL を触って SIGABRT する
@@ -118,8 +125,9 @@ final class AudioEngineController {
             fatalError("AVAudioFormat(standardFormatWithSampleRate: \(renderSampleRate), channels: 1) returned nil")
         }
 
-        // DroneGenerator を先に作る（engine の rendering mode とは独立に source node を構築できる）。
+        // Generator を先に作る（engine の rendering mode とは独立に source node を構築できる）。
         self.droneGenerator = DroneGenerator(format: format, frequency: frequency)
+        self.noiseGenerator = NoiseGenerator(format: format)
 
         // offline モードでは attach / connect の前に manual rendering を有効化する必要がある。
         // realtime モードでは何もしない（mainMixerNode は通常通り outputNode 経由でハードウェアへ）。
@@ -191,7 +199,8 @@ final class AudioEngineController {
                 return
             }
             // さらに二重チェック: 再 start で target が audible に戻っていれば finalize しない。
-            if self.droneGenerator.hasAudibleTarget {
+            // Drone / Noise どちらかが audible なら fade-out 中ではない（再 start 後）。
+            if self.droneGenerator.hasAudibleTarget || self.noiseGenerator.hasAudibleTarget {
                 self.logger.info("fade-out 中に再 start を検知 (hasAudibleTarget)。engine.stop() をスキップ。")
                 return
             }
@@ -256,14 +265,17 @@ final class AudioEngineController {
 
     // MARK: - フェードスケジュール
 
-    /// fade-in を `droneGenerator` に依頼する。秒数で渡し、フレーム換算は generator 側。
+    /// fade-in を `droneGenerator` と `noiseGenerator` の両方に依頼する。
+    /// 両 generator は独立した state を持つが、UX 上は「Sleep モード全体の fade-in」として揃える。
     private func scheduleFadeIn() {
         droneGenerator.scheduleFadeIn(duration: fadeInSeconds)
+        noiseGenerator.scheduleFadeIn(duration: fadeInSeconds)
     }
 
-    /// fade-out を `droneGenerator` に依頼する。
+    /// fade-out を `droneGenerator` と `noiseGenerator` の両方に依頼する。
     private func scheduleFadeOut() {
         droneGenerator.scheduleFadeOut(duration: fadeOutSeconds)
+        noiseGenerator.scheduleFadeOut(duration: fadeOutSeconds)
     }
 
     // MARK: - offline render
@@ -302,7 +314,7 @@ final class AudioEngineController {
         scheduleFadeIn()
 
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        guard let outputURL = documentsURL?.appendingPathComponent("drone.wav") else {
+        guard let outputURL = documentsURL?.appendingPathComponent("sleep-mix.wav") else {
             logger.error("Documents ディレクトリの解決に失敗しました。")
             return false
         }
@@ -408,15 +420,20 @@ final class AudioEngineController {
     // MARK: - セットアップ
 
     /// オーディオグラフを構築する。初期化時に一度だけ呼ぶ。
-    /// `droneGenerator.sourceNode` を attach し、mainMixerNode に接続する。
+    /// `droneGenerator.sourceNode` と `noiseGenerator.sourceNode` を attach し、
+    /// `mainMixerNode` に並列接続する（複数 source → mixer の和音構成）。
     private func buildAudioGraph() {
-        let node = droneGenerator.sourceNode
+        let droneNode = droneGenerator.sourceNode
+        let noiseNode = noiseGenerator.sourceNode
         let format = droneGenerator.sourceFormat
 
-        engine.attach(node)
+        engine.attach(droneNode)
+        engine.attach(noiseNode)
         // `mainMixerNode` へアクセスすると outputNode への接続が自動生成される。
         // manual rendering mode が有効ならハードウェアではなく manual output に向く。
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+        // 複数 source を同じ mixer に connect するとフレームワーク側でミックスされる。
+        engine.connect(droneNode, to: engine.mainMixerNode, format: format)
+        engine.connect(noiseNode, to: engine.mainMixerNode, format: format)
         engine.mainMixerNode.outputVolume = defaultVolume
         engine.prepare()
     }

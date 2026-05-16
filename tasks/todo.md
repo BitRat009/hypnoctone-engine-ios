@@ -133,7 +133,38 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
       - 2 回目: seqlock 復活 → 「writer mid-payload window」（payload 書き込み済み・gen 未更新時の race）を発見
       - 3 回目: odd/even seqlock 採用 → begin marker の ordering が `.releasing` だと「後続 store の前倒し」を防げないと指摘
       - 4 回目: begin = `.acquiringAndReleasing` / end = `.releasing` に → 最終 OK
-- [ ] Phase 5: push → Codemagic 実走 → artifacts_006 で WAV 形状維持を確認
-      - 期待: fade-in 0.8s + 定常 2.4s + fade-out 0.8s の WAV、44.1kHz mono、>= 3.5s
-      - swift-atomics の SPM 解決が CI で初回成功するか（Package.resolved は手元で生成不能）
-- [ ] 残課題: Mac/Xcode ビルド検証は CI 待ち（Windows 環境ではビルド不可）
+- [x] Phase 5: push → Codemagic 実走 → artifacts_008 で WAV 形状維持を確認
+      - swift-atomics の SPM 解決が CI で初回成功（ビルド通過）
+      - アプリ crash 無し（t+5/8/11s で pid 1840 生存）
+      - WAV: pcm_s16le / 44100Hz / 1ch / 4.09s（仕様 >= 3.5s クリア）
+      - 0.1s 窓 max-abs 解析で fade-in 0→2317 線形 / 定常 2317 平坦 / fade-out 2317→0 線形を実測
+      - odd/even seqlock writer + atomic ManagedAtomic load/store が realtime audio 制約下で安定動作
+
+## Task 8 — NoiseGenerator 追加（ピンクノイズを Drone に重ねる）
+
+- [x] Phase 1: NoiseRenderState 作成
+      - DroneGenerator の ToneRenderState と同じ atomic 構造（pending 3 フィールドを ManagedAtomic）
+      - 追加: xorshift32 PRNG state（UInt32, seed=0xCAFEBABE）
+      - 追加: Paul Kellet's pink filter state（b0..b6 Float）
+      - defaultAmplitude = 0.05（Drone 0.2 の 1/4）
+- [x] Phase 2: NoiseGenerator 作成
+      - DroneGenerator と同形式の @MainActor final class
+      - render block: odd/even seqlock fade consume → xorshift32 (`&<<`, `&>>`) でホワイトノイズ → Paul Kellet's filter でピンク化 → fade amplitude
+      - ホワイトノイズ Float 化は上位 24bit を使う精度配慮（`Float(prng &>> 8) * (2.0 / 1<<24) - 1.0`）
+      - scheduleFadeIn/Out / hasAudibleTarget は DroneGenerator と完全同形式
+- [x] Phase 3: AudioEngineController で Noise を attach
+      - noiseGenerator: NoiseGenerator フィールド追加、init で生成
+      - buildAudioGraph で Drone と Noise の両 source を mainMixerNode に並列 connect
+      - scheduleFadeIn/Out で両 generator に同じ duration で fade スケジュール
+      - hasAudibleTarget チェック: drone OR noise
+      - WAV ファイル名 `drone.wav` → `sleep-mix.wav`（Drone 単独ではなく mix を表す）
+      - codemagic.yaml の WAV 参照とコメント・ステップ名も同期更新
+- [x] Phase 4: Codex レビュー
+      - 1 回往復で Critical/High/Medium 全てなしの最終 OK
+      - 軽微指摘の WAV 名違和感 → リネームで対応
+      - Paul Kellet's 係数妥当性 / xorshift32 audio thread 安全性 / 並列 mixer 接続 / クリッピング余裕を全部確認
+- [ ] Phase 5: push → Codemagic 実走 → artifacts_009 で Drone + Noise mix を確認
+      - 期待: WAV 仕様（44.1kHz mono >= 3.5s）維持
+      - 振幅エンベロープが fade 形状を保ちつつ Drone 単独時より大きい（ノイズ重畳の証拠）
+      - crash 無し
+      - codemagic.yaml の WAV パス更新でも CI フローが回ること
