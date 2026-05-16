@@ -1,4 +1,5 @@
 import Foundation
+import Atomics
 
 /// サイン波生成と振幅補間（フェードイン / フェードアウト）に必要な状態を保持するクラス。
 ///
@@ -7,66 +8,73 @@ import Foundation
 /// render block はリアルタイムのオーディオスレッドで実行されるため、
 /// ここではアロケーション・ロック・I/O を行わず、単純な数値の読み書きだけに留める。
 ///
-/// ## スレッドモデル（pending / active 分離）
+/// ## スレッドモデル（pending / active 分離 + odd/even seqlock）
 ///
-/// data race を避けるため、状態を 3 つのグループに分ける:
+/// data race を完全に排除するため、状態を 3 つのグループに分ける:
 ///
 /// 1. **Audio thread 単一所有**（writer も reader も audio thread のみ）
 ///    - `phase`, `currentAmplitude`, `activeTargetAmplitude`, `activeFadeFramesRemaining`,
 ///      `lastConsumedGeneration`
 ///    - render block 内で自由に読み書きできる。コンフリクトしない。
 ///
-/// 2. **Main writer / Audio reader（pending command）**
-///    - `pendingTargetAmplitude`, `pendingFadeFrames`, `pendingGeneration`
-///    - メインスレッドの `scheduleFade*` がこれらを書く。
-///    - 書き込み順序が重要: `pendingTarget` → `pendingFrames` → `pendingGeneration` の順。
-///    - `pendingGeneration` は最後に書くことで「コマンドが揃ったこと」のマーカーになる。
+/// 2. **Main writer / Audio reader（pending command）** — **全 atomic**
+///    - `pendingTargetAmplitudeBits`（Float の bitPattern を保持）, `pendingFadeFrames`,
+///      `pendingGeneration`
+///    - メインスレッドの `scheduleFade*` が odd/even seqlock writer プロトコルで publish。
+///    - audio thread が render block で seqlock reader プロトコルで consume。
 ///
 /// 3. **定数**
 ///    - `frequency`, `sampleRate`, `phaseIncrement`, `twoPi`, `defaultAmplitude`
 ///
-/// ## Audio thread の consume プロトコル（best-effort、厳密 atomicity は無し）
+/// ## なぜ odd/even seqlock + atomic が必要か（Task 7 で厳密化した経緯）
 ///
-/// 各 render block の先頭で:
-/// 1. `gen1 = pendingGeneration` を読む
-/// 2. `gen1 != lastConsumedGeneration` なら新しいコマンドありと推定
-/// 3. `pendingTargetAmplitude` と `pendingFadeFrames` を読む
-/// 4. `gen2 = pendingGeneration` を再度読む
-/// 5. `gen1 == gen2` なら「メインが書き込み中ではなさそう」と判断 → active に転記、`lastConsumedGeneration = gen1`
-/// 6. `gen1 != gen2` ならメインが書き込み中 → このブロックは skip、次ブロックで再試行
+/// 以前（Task 6）は `pendingTargetAmplitude` を plain `Float` にして seqlock 風プロトコルで
+/// 凌いでいたが、以下 2 種類の race が理論的に残っていた:
 ///
-/// ## なぜこの設計か（active 書き戻し競合の解消）
+/// - **store-store reordering**: コンパイラ・CPU が `pendingGeneration` の更新を
+///   `pendingTargetAmplitude` / `pendingFadeFrames` の書き込みより先に observable にする
+///   可能性があり、audio が stale payload を accept する穴があった。
+/// - **plain field 上の torn read**: Float の 4 バイトが部分的に書き換えられ得る（実機
+///   ARM64 でアラインされた 32bit access は実用上 atomic だが、Swift memory model 上は UB）。
 ///
-/// 以前は `fadeFramesRemaining` を main と audio の両方が書き換えていた。
-/// main が `scheduleFadeOut` で 35280 を書いた直後に、audio が「前のブロックで進めた残り」
-/// を書き戻して main の指示を消すケースがあった（Codex Task 6 レビュー High 指摘）。
+/// Task 7 第 1 弾で `pending*` をすべて `ManagedAtomic` 化し、release/acquire memory ordering
+/// を pendingGeneration に乗せ、reader 側で gen を pre/post 2 回 acquire-load する
+/// seqlock 風プロトコルにした。しかし Codex 2 回目レビューで残課題が判明:
 ///
-/// この設計では:
-/// - **active 変数群は audio thread の単一所有**（書き戻しの衝突なし）→ ここが本改善の核心
-/// - pending 変数群は「最新の指示」を保持し、audio がブロック先頭で読む
-/// - generation counter で「メインが書き込み中の中途半端な状態」を検出しようと試みる
+/// - **writer mid-payload window**: writer が target/frames を書き終え、まだ gen を
+///   increment していない瞬間に reader が走ると、`g1 == g2` を通過してしまい、
+///   新 payload を旧 generation 名義で commit する穴があった。
 ///
-/// ## 残る理論的リスク（重要：Swift memory model 上は依然 data race）
+/// Task 7 第 2 弾（現状）で odd/even seqlock に切り替えた:
 ///
-/// `pending*` フィールドへの cross-thread アクセスは plain class field なので、
-/// Swift の memory model 上は data race のまま。具体的に残る穴:
+/// - **publish 順序**（main 側）:
+///   1. `gen.wrappingIncrement(.acquiringAndReleasing)` — odd（書き込み中マーカー）。
+///      `.acquiringAndReleasing` で後続 payload store が odd marker より前に
+///      出ないことを保証する（`.releasing` だけだと「以前の操作」しか release できず、
+///      後続 store の前倒しを防げない）。
+///   2. `target.store(.relaxed)` / `frames.store(.relaxed)`
+///   3. `gen.wrappingIncrement(.releasing)` — even（公開済みマーカー）。
+///      payload store の publish と「writer 完了」の通知を兼ねる。
 ///
-/// - **store-store reordering**: Swift コンパイラ or CPU（特に ARM64）が
-///   `pendingGeneration` の更新を `pendingTargetAmplitude`/`pendingFadeFrames` の書き込みより
-///   先に観測可能にする可能性がある。その場合、audio が
-///   `gen1 = new / target = 古い値 / frames = 古い値 / gen2 = new` を読み、
-///   `gen1 == gen2` のチェックを通過して stale payload を accept する穴がある
-///   （Codex データレース改善レビュー指摘）。
-/// - **実用上の評価**:
-///   - fade スケジュールは start / stop 押下時に発火するのみ（秒に 1 回以下）
-///   - x86_64 は TSO で store-store 順序が比較的保たれるので穴は出にくい
-///   - ARM64（シミュレータ・実機）では理論上ありうるが、発生したとしても
-///     fade 時間が 1 サイクル分ズレる程度の聴感差にとどまる
-///   - Sleep アプリの音質要件では「許容範囲のリスク」と判断
+/// - **observe 順序**（audio 側）:
+///   1. `g1 = gen.load(.acquiring)`
+///   2. `g1` が odd なら writer 書き込み中 → skip
+///   3. `g1 == lastConsumedGeneration` なら新コマンド無し → skip
+///   4. `target.load(.relaxed)` / `frames.load(.relaxed)`
+///   5. `g2 = gen.load(.acquiring)`
+///   6. `g1 == g2` で reader 読み中に writer が割り込まなかったと確定 → commit
+///   7. 不一致なら skip（次ブロックで retry）
 ///
-/// 厳密に解決するには Swift Atomics パッケージ（`swift-atomics`）の `ManagedAtomic<UInt32>` で
-/// `pendingGeneration` を保護し、`Float` 値は `bitPattern` 経由で `UInt32` atomic に格納する。
-/// iOS 18+ なら標準の `Synchronization.Atomic` が使える。これは別タスクとして積んでいる。
+/// odd/even により「writer mid-payload」が gen の奇数性で表現され、reader 側で確実に
+/// 検出できる。`g1 == g2` の post-check も併用することで「reader が target/frames を
+/// 読んだ後に writer が走った」ケースも検出できる。これで multi-field snapshot の
+/// 整合性が完全に保証される。
+///
+/// ## 補足: なぜ `lastConsumedGeneration` は atomic ではないか
+///
+/// audio thread の単一所有なので race しない。render block の入口で読み、commit 時に書き、
+/// 同一スレッド内で完結する。初期値 0（even）。最初の writer が gen を 1 → 2 と進めるので
+/// reader は gen=2 を新コマンドとして consume できる。
 final class ToneRenderState {
 
     // MARK: - 定数
@@ -104,19 +112,22 @@ final class ToneRenderState {
     /// この値と違ったら新しいコマンドがあると判断する。
     var lastConsumedGeneration: Int = 0
 
-    // MARK: - Main writer / Audio reader（pending command）
+    // MARK: - Main writer / Audio reader（pending command, 全 atomic）
 
-    /// 次の fade で目指す振幅。メインスレッドが `scheduleFade*` で書く。
-    /// 書き込み順序の制約: `pendingFadeFrames` より先に書くこと。
-    var pendingTargetAmplitude: Float = 0.0
+    /// 次の fade で目指す振幅（Float の bitPattern を保持）。
+    /// メインスレッドの `scheduleFade*` が **relaxed store**、
+    /// audio thread が新世代観測後に **relaxed load** する。
+    /// gen の release/acquire により実際の値は publish される。
+    let pendingTargetAmplitudeBits = ManagedAtomic<UInt32>(0)
 
-    /// 次の fade で使う総フレーム数。
-    /// 書き込み順序の制約: `pendingTargetAmplitude` の後、`pendingGeneration` の前に書くこと。
-    var pendingFadeFrames: Int = 0
+    /// 次の fade で使う総フレーム数。`pendingTargetAmplitudeBits` と同じく
+    /// relaxed store / relaxed load で、publish は `pendingGeneration` の release/acquire 任せ。
+    let pendingFadeFrames = ManagedAtomic<Int>(0)
 
-    /// fade コマンドの世代番号。メインスレッドが `scheduleFade*` の **最後** にインクリメントする。
-    /// この値が `lastConsumedGeneration` と違ったら、audio thread は新しいコマンドを consume する。
-    var pendingGeneration: Int = 0
+    /// fade コマンドの世代番号。メインスレッドが `scheduleFade*` の **最後** に
+    /// **releasing** で increment する。audio thread は **acquiring** で load し、
+    /// `lastConsumedGeneration` と違ったら新しいコマンドがあると判断する。
+    let pendingGeneration = ManagedAtomic<Int>(0)
 
     // MARK: - 初期化
 

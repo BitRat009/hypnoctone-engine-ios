@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		HYPNOCTONE0000000000A001 /* Atomics in Frameworks */ = {isa = PBXBuildFile; productRef = HYPNOCTONE0000000000A003 /* Atomics */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		HYPNOCTONE00000000000003 /* HypnoctoneEngine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HypnoctoneEngine.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -19,6 +23,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				HYPNOCTONE0000000000A001 /* Atomics in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -60,6 +65,9 @@
 				HYPNOCTONE0000000000000F /* HypnoctoneEngine */,
 			);
 			name = HypnoctoneEngine;
+			packageProductDependencies = (
+				HYPNOCTONE0000000000A003 /* Atomics */,
+			);
 			productName = HypnoctoneEngine;
 			productReference = HYPNOCTONE00000000000003 /* HypnoctoneEngine.app */;
 			productType = "com.apple.product-type.application";
@@ -89,6 +97,9 @@
 			);
 			mainGroup = HYPNOCTONE00000000000001;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				HYPNOCTONE0000000000A002 /* XCRemoteSwiftPackageReference "swift-atomics" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = HYPNOCTONE00000000000002 /* Products */;
 			projectDirPath = "";
@@ -313,6 +324,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		HYPNOCTONE0000000000A002 /* XCRemoteSwiftPackageReference "swift-atomics" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-atomics.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		HYPNOCTONE0000000000A003 /* Atomics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = HYPNOCTONE0000000000A002 /* XCRemoteSwiftPackageReference "swift-atomics" */;
+			productName = Atomics;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = HYPNOCTONE00000000000009 /* Project object */;
 }

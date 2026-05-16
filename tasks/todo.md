@@ -110,4 +110,30 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] **High 後続課題 (Codex Task 6 指摘 1)**: ToneRenderState を pending（main writer / audio reader）/ active（audio 単一所有）に分離。active 書き戻し競合（fadeFramesRemaining の上書き）を完全に解消
       - generation counter + double-check で best-effort な publication プロトコルを実装
       - Codex 再レビュー: active 書き戻し競合は解消されたが、pending 領域は依然として Swift memory model 上 data race。store-store reordering で stale payload を accept する理論的穴が残る（実用上は許容）
-- [ ] **厳密 atomicity 後続課題**: pending 領域の torn read を完全に排除するため Swift Atomics パッケージ導入を検討。`pendingGeneration` を `ManagedAtomic<UInt32>` で release/acquire、`pendingTargetAmplitude` は `bitPattern` 経由で UInt32 atomic に。iOS 18+ なら標準の `Synchronization.Atomic`。Task 7+ で取り組み
+- [x] **厳密 atomicity 後続課題**: pending 領域の torn read を完全に排除するため Swift Atomics パッケージ導入を検討。`pendingGeneration` を `ManagedAtomic<UInt32>` で release/acquire、`pendingTargetAmplitude` は `bitPattern` 経由で UInt32 atomic に。iOS 18+ なら標準の `Synchronization.Atomic`。Task 7+ で取り組み → **Task 7 で完遂**
+
+## Task 7 — pending 領域の data race 厳密排除（odd/even seqlock + atomic）
+
+- [x] Phase 1: swift-atomics SPM 依存を pbxproj に追加
+      - 手書き pbxproj に PBXBuildFile / XCRemoteSwiftPackageReference / XCSwiftPackageProductDependency セクション新設
+      - target の `packageProductDependencies` と PBXProject の `packageReferences` を追加
+      - Frameworks build phase に Atomics をリンク
+      - swift-atomics 1.2.0 upToNextMajorVersion を https://github.com/apple/swift-atomics.git から取得
+- [x] Phase 2: ToneRenderState の pending 3 フィールドを ManagedAtomic 化
+      - `pendingTargetAmplitudeBits: ManagedAtomic<UInt32>`（Float bitPattern）
+      - `pendingFadeFrames: ManagedAtomic<Int>`
+      - `pendingGeneration: ManagedAtomic<Int>`
+      - audio-thread-only な active / phase / currentAmplitude / lastConsumedGeneration は plain のまま
+- [x] Phase 3: DroneGenerator を odd/even seqlock に書き換え
+      - writer（main）: gen を `.acquiringAndReleasing` で odd → payload を relaxed store → gen を `.releasing` で even
+      - reader（render block）: `g1 acquire load → even & 新世代チェック → payload relaxed load → g2 acquire load → g1==g2 で commit`
+      - 旧 plain-field seqlock を完全置換
+- [x] Phase 4: Codex に 4 回往復レビュー
+      - 1 回目: 「acquire/release だけで OK」と誤判断 → HIGH 指摘で multi-field snapshot 不整合の race を発見
+      - 2 回目: seqlock 復活 → 「writer mid-payload window」（payload 書き込み済み・gen 未更新時の race）を発見
+      - 3 回目: odd/even seqlock 採用 → begin marker の ordering が `.releasing` だと「後続 store の前倒し」を防げないと指摘
+      - 4 回目: begin = `.acquiringAndReleasing` / end = `.releasing` に → 最終 OK
+- [ ] Phase 5: push → Codemagic 実走 → artifacts_006 で WAV 形状維持を確認
+      - 期待: fade-in 0.8s + 定常 2.4s + fade-out 0.8s の WAV、44.1kHz mono、>= 3.5s
+      - swift-atomics の SPM 解決が CI で初回成功するか（Package.resolved は手元で生成不能）
+- [ ] 残課題: Mac/Xcode ビルド検証は CI 待ち（Windows 環境ではビルド不可）

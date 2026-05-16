@@ -1,4 +1,5 @@
 import AVFoundation
+import Atomics
 import os
 
 /// Sleep モード基底音となる Drone（持続音）を生成する。
@@ -12,10 +13,15 @@ import os
 /// - render block は audio thread（realtime）または main thread（offline）で AVAudioEngine から呼ばれる
 /// - render block は `ToneRenderState` の値を直接 read/write するだけで、Generator 本体のメソッドは呼ばない
 ///
-/// ## fade ロジック（pending/active 分離）
+/// ## fade ロジック（odd/even seqlock）
 /// `scheduleFadeIn(duration:)` / `scheduleFadeOut(duration:)` でメインスレッドが
-/// **pending 領域** に新しい fade コマンドを書く（target → frames → generation の順）。
-/// render block はブロック先頭で pending を atomically consume して **active 領域** に転記し、
+/// **pending 領域** に新しい fade コマンドを書く。
+///   1. gen を **.acquiringAndReleasing** increment（odd: 書き込み中マーカー、後続 store の前倒しを防ぐ）
+///   2. target / frames を relaxed store
+///   3. gen を **.releasing** increment（even: 公開済みマーカー、payload の publish）
+/// render block はブロック先頭で `pendingGeneration` を 2 回 acquiring load し、
+/// g1 が even かつ g1 == g2 かつ `lastConsumedGeneration` と異なるときだけ
+/// target/frames を relaxed load して **active 領域** に転記する。
 /// 実際の補間は active 領域に対して行う。詳細は `ToneRenderState` のコメント参照。
 @MainActor
 final class DroneGenerator {
@@ -73,31 +79,45 @@ final class DroneGenerator {
 
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
 
-            // ---- ブロック先頭で pending command を best-effort で consume ----
+            // ---- ブロック先頭で pending command を odd/even seqlock で consume ----
             //
-            // 1. pendingGeneration を読む
-            // 2. lastConsumedGeneration と異なれば新しいコマンドあり（と推定）
-            // 3. target / frames を読む
-            // 4. pendingGeneration を再度読む
-            // 5. 1 回目と 2 回目が一致 → 「main が書き込み中ではなさそう」と判断、active に転記
-            // 6. 不一致 → main が書き込み中、このブロックは skip（active を据え置き、次ブロックで retry）
+            // writer は payload 書き込み前に gen を odd（書き込み中）、書き込み完了後に
+            // even（公開済み）にする。reader は g1 が odd なら skip、even なら payload を
+            // 読んで g2 と比較し、g1 == g2 で commit する。
             //
-            // 注: これは Swift の memory model 上は厳密な atomic publication ではない。
-            // store-store 並べ替えで gen が値より先に observable になると、stale payload を
-            // accept する穴が残る（詳細は ToneRenderState のコメント参照）。
-            // 実用上は許容、厳密化したい時は Swift Atomics 導入で対応する。
-            let gen1 = state.pendingGeneration
-            if gen1 != state.lastConsumedGeneration {
-                let newTarget = state.pendingTargetAmplitude
-                let newFrames = state.pendingFadeFrames
-                let gen2 = state.pendingGeneration
-                if gen1 == gen2 {
-                    state.activeTargetAmplitude = newTarget
+            // 単純な pre/post acquire-load だけだと「writer が target/frames を書き終え、
+            // まだ gen を increment していない窓」で reader が新 payload を旧 gen 名義で
+            // commit する穴が残る（Codex Task 7 レビュー 2 回目 High 指摘）。
+            // odd/even seqlock は「writer が書き込み中である」状態を gen 自体に乗せることで
+            // この穴を塞ぐ。
+            //
+            // 手順:
+            //   1. g1 = gen.load(.acquiring)
+            //   2. g1 が odd → writer 書き込み中 → skip
+            //   3. g1 == lastConsumed → 新コマンド無し → skip
+            //   4. target / frames を relaxed load
+            //   5. g2 = gen.load(.acquiring)
+            //   6. g1 == g2（かつ g1 even）→ 「読み中に writer が割り込まなかった」と確定 → commit
+            //   7. g1 != g2 → writer が mid-read で割り込んだ → skip（次ブロックで retry）
+            //
+            // release/acquire により g1 / g2 の publish 順序が保証され、relaxed load の
+            // target/frames は g1/g2 の acquire fence 内側で読まれるので happens-before で
+            // 整合する payload を観測できる。target/frames 自体も atomic なので torn read は無い。
+            let g1 = state.pendingGeneration.load(ordering: .acquiring)
+            if g1 & 1 == 0 && g1 != state.lastConsumedGeneration {
+                let newTargetBits = state.pendingTargetAmplitudeBits.load(ordering: .relaxed)
+                let newFrames = state.pendingFadeFrames.load(ordering: .relaxed)
+                let g2 = state.pendingGeneration.load(ordering: .acquiring)
+                if g1 == g2 {
+                    state.activeTargetAmplitude = Float(bitPattern: newTargetBits)
                     state.activeFadeFramesRemaining = newFrames
-                    state.lastConsumedGeneration = gen1
+                    state.lastConsumedGeneration = g1
                 }
-                // gen1 != gen2 の場合は何もしない（次ブロックで再試行される）
+                // g1 != g2 の場合: writer が mid-read で割り込んだ。
+                // active 据え置きで次ブロックの retry に任せる。
             }
+            // g1 が odd の場合: writer が今まさに書き込み中。
+            // active 据え置きで次ブロックの retry に任せる。
 
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             let phaseIncrement = state.phaseIncrement
@@ -135,29 +155,44 @@ final class DroneGenerator {
         }
     }
 
-    // MARK: - フェードスケジュール（pending 領域に書く）
+    // MARK: - フェードスケジュール（odd/even seqlock writer）
 
     /// fade-in をスケジュールする（現在の振幅から `defaultAmplitude` まで線形上昇）。
-    /// pending 領域に新しいコマンドを書き、generation を最後にインクリメントする。
+    ///
+    /// odd/even seqlock writer プロトコル:
+    ///   1. gen を **.acquiringAndReleasing** increment → odd（書き込み中マーカー）
+    ///   2. target / frames を relaxed store
+    ///   3. gen を **.releasing** increment → even（公開済みマーカー）
+    ///
+    /// reader（render block）は gen が odd の間は skip、even を見て g1 == g2 のときだけ
+    /// commit する（`DroneGenerator` 初期化時の sourceNode closure 内コメント参照）。
     /// - Parameter duration: 補間に使う秒数。フレーム数は内部で `sampleRate * duration` から計算。
     func scheduleFadeIn(duration: TimeInterval) {
         let frames = max(1, Int(sampleRate * duration))
-        // 書き込み順序が重要: target → frames → generation の順。
-        // generation を最後に書くことで、audio thread が「コマンドが揃った」と判断できる。
-        renderState.pendingTargetAmplitude = defaultAmplitude
-        renderState.pendingFadeFrames = frames
-        renderState.pendingGeneration &+= 1
-        logger.info("Drone fade-in scheduled: target=\(self.defaultAmplitude, privacy: .public) frames=\(frames) gen=\(self.renderState.pendingGeneration)")
+        // 1) writer 開始マーク（gen を odd に）。
+        //    .acquiringAndReleasing で後続 payload store が odd marker より前に出ないようにする
+        //    （.releasing だけだと「以前の操作」しか release できず、後続 store の前倒しを防げない）。
+        renderState.pendingGeneration.wrappingIncrement(by: 1, ordering: .acquiringAndReleasing)
+        // 2) payload 書き込み。
+        renderState.pendingTargetAmplitudeBits.store(defaultAmplitude.bitPattern, ordering: .relaxed)
+        renderState.pendingFadeFrames.store(frames, ordering: .relaxed)
+        // 3) writer 完了マーク（gen を even に）。これで reader が payload を取りに来る。
+        let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
+        logger.info("Drone fade-in scheduled: target=\(self.defaultAmplitude, privacy: .public) frames=\(frames) gen=\(newGen)")
     }
 
     /// fade-out をスケジュールする（現在の振幅から 0 まで線形下降）。
+    /// プロトコルは `scheduleFadeIn(duration:)` と同じ odd/even seqlock writer。
     /// - Parameter duration: 補間に使う秒数。
     func scheduleFadeOut(duration: TimeInterval) {
         let frames = max(1, Int(sampleRate * duration))
-        renderState.pendingTargetAmplitude = 0.0
-        renderState.pendingFadeFrames = frames
-        renderState.pendingGeneration &+= 1
-        logger.info("Drone fade-out scheduled: target=0 frames=\(frames) gen=\(self.renderState.pendingGeneration)")
+        // begin marker（odd）は .acquiringAndReleasing で後続 payload store の前倒しを防ぐ。
+        renderState.pendingGeneration.wrappingIncrement(by: 1, ordering: .acquiringAndReleasing)
+        renderState.pendingTargetAmplitudeBits.store(Float(0).bitPattern, ordering: .relaxed)
+        renderState.pendingFadeFrames.store(frames, ordering: .relaxed)
+        // end marker（even）は .releasing。これで reader が payload を取りに来る。
+        let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
+        logger.info("Drone fade-out scheduled: target=0 frames=\(frames) gen=\(newGen)")
     }
 
     // MARK: - 状態参照
@@ -166,6 +201,7 @@ final class DroneGenerator {
     /// （audio thread の補間進行とは独立に「ユーザー意図」を表す）。
     /// `AudioEngineController` が fade-out 中に再 start が走ったかを検知する用途で使う。
     var hasAudibleTarget: Bool {
-        renderState.pendingTargetAmplitude > 0.0
+        let bits = renderState.pendingTargetAmplitudeBits.load(ordering: .relaxed)
+        return Float(bitPattern: bits) > 0.0
     }
 }
