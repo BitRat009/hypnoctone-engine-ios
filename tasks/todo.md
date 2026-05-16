@@ -254,8 +254,37 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Phase 4: Codex レビュー
       - Critical/High/Medium 全てなし、最終 OK 一発で取得
       - 軽微指摘「最小公倍数が事実上発散」表現を「互いに約分しにくい比」に修正
-- [ ] Phase 5: push → Codemagic → artifacts_012 で LFO 効果を確認
-      - 期待: WAV stereo 維持、L/R 検査クリア、振幅エンベロープは LFO で変化しないので Task 10 同様
-      - Goertzel で固定周波数 mag が Task 10 比で少し下がる（エネルギーが ±cent 範囲に分散）
-      - 周辺周波数 (±数 Hz) のエネルギー和は維持される予測
+- [x] Phase 5: push → Codemagic → artifacts_012 で LFO 効果を完全実証
+      - WAV stereo / 44.1kHz / 4.09s 維持、crash 無し（pid 1893 全 probe 生存）
+      - L_MAX 4713→5020 (+6%) / R_MAX 4666→4875 (+4%) / DIFF_MAX 4465→4154 (-7%)
+      - **Goertzel で主ピーク 35〜70% 低下**を確認 = LFO がエネルギーを ±cent 範囲に分散している証拠
+        - 220 L 219.873Hz mag: 2454 → 1539 (-37%)
+        - 330 R 330.190Hz mag: 1309 → 360 (-72%)
+        - 440 L 439.746Hz mag: 817 → 284 (-65%)
+      - **「対称位置」でピーク出現** (L 側で R 用 220.127Hz mag が +99%) = LFO 深さ 2.5cent が
+        detune 半幅 1cent より大きいため周波数領域で L/R が部分混合
+      - 3 声すべて同パターンで 3 つの独立 LFO が全部動いている確証
+      - 設計判断: LFO depth (2.5cent) > detune 半幅 (1cent) → 「ゆらぎ感」優先、L/R 明確分離は弱め
+        実聴判断で LFO depth を下げる選択肢あり（Task 11.5 として保留）
+
+## Task 12 — 音質アップ第 4 弾: ノイズ帯域整形（雨音風 lowpass + cutoff LFO）
+
+- [x] Phase 1: NoiseRenderState に lowpass + cutoff LFO state 追加
+      - 定数: filterCutoffCenter (2000Hz), filterCutoffDepthHz (400Hz), filterLfoPhaseIncrement
+      - audio var: lpL/lpR (1-pole IIR state, L/R 独立), filterLfoPhase (L/R 共通)
+      - init に filter パラメータ + defaultAmplitude 既定 0.05 → 0.08 (lowpass 補正)
+- [x] Phase 2: NoiseGenerator render block に lowpass + cutoff LFO を組み込み
+      - ブロック単位で cutoff = center + depth × sin(filterLfoPhase) → α = 1 - exp(-2π × cutoff / sr)
+      - cutoff は 20Hz〜nyquist-100Hz にクランプ（異常値防御）
+      - Paul Kellet's filter 後に L/R 別 lowpass: lpL += α × (pinkL - lpL)
+      - ブロック末尾で filterLfoPhase を進めて 2π 折り返し
+      - exp/sin は 1 ブロックあたり 1 回ずつで audio thread 負荷極小
+- [x] Phase 3: AudioEngineController で NoiseGenerator パラメータを明示渡し
+      - amp=0.08, cutoff=2000±400Hz, LFO 11s 周期を明示
+      - クラスドキュメント / Headroom コメント更新（Noise が hard limit 無し統計信号と明示）
+- [x] Phase 4: Codex レビュー
+      - Critical/High なし、Medium 2 件（α コメント精度 + Headroom 表現）→ 反映後最終 OK
+- [ ] Phase 5: push → Codemagic → artifacts_013 で雨音風 lowpass を実証
+      - 期待: WAV stereo 維持、L/R 検査クリア、Drone 220/330/440 のピーク維持
+      - 高域 (例 5000Hz, 8000Hz) の Goertzel mag が Task 11 比で大幅低下 = lowpass の証拠
       - crash 無し、クリッピング無し

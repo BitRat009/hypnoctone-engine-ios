@@ -6,8 +6,9 @@ import os
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
 /// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
 /// （基音 + 完全 5度 + オクターブ、純正律比、L/R 微小 detune、各声に独立 LFO で pitch vibrato）と
-/// `NoiseGenerator`（ピンクノイズ、L/R 独立 PRNG）に委譲し、`mainMixerNode` で並列ミックスする。
-/// 出力フォーマットは 2ch stereo（Task 10 から）。音声ファイル・録音素材・ループ素材は一切使わない。
+/// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
+/// `mainMixerNode` で並列ミックスする。出力フォーマットは 2ch stereo（Task 10 から）。
+/// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
 /// ## 想定する呼び出しスレッド
 /// クラス全体を `@MainActor` で隔離し、`start()` / `stop()` / `setVolume(_:)` を含む
@@ -140,14 +141,16 @@ final class AudioEngineController {
         // 3 声のゆらぎが揃わない（時間軸で複雑に変化し続ける）ようにする。周期は素数寄りの
         // 13.7 / 17.3 / 23.1 秒で、互いに約分しにくい比のため聴感上の繰り返しが目立たない。
         //
-        // Headroom 評価:
+        // Headroom 評価（Task 12 で Noise amp 0.05→0.08 に増加）:
         //   - Drone 3 声は純サイン波で peak 厳密上限 = 0.15 + 0.08 + 0.05 = 0.28
         //     （LFO は pitch のみで amplitude には影響しないので peak 上限は不変）
-        //   - Noise は Paul Kellet's filter 出力で defaultAmplitude=0.05 を係数とした
-        //     統計的振幅（厳密に [-0.05, 0.05] に収まる保証は無いが実測でほぼこのオーダー）
-        //   - 合算で実効ピークは 0.3 前後
+        //   - Noise は Paul Kellet's filter + 1-pole lowpass の出力に
+        //     defaultAmplitude=0.08 を掛けた統計信号（hard limit 無し）。
+        //     ピンクノイズ自体は ±1 を超える瞬時値も理論上は出るが実測でほぼ ±0.08 のオーダー、
+        //     lowpass で高域カットされる分さらに RMS は下がる
+        //   - 合算で実効ピークは 0.3 前後の見込み
         //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.15 前後
-        // 16bit s16le 換算でも余裕があり、CI の WAV 検査でクリッピング無しを確認できる。
+        // 16bit s16le 換算でも余裕がある見込み。CI の WAV 検査でクリッピング無しを実測確認する。
         let fifthFrequency = rootFrequency * 1.5
         let octaveFrequency = rootFrequency * 2.0
         self.droneGenerators = [
@@ -167,7 +170,15 @@ final class AudioEngineController {
                 defaultAmplitude: 0.05
             ),
         ]
-        self.noiseGenerator = NoiseGenerator(format: format)
+        // Noise: 雨音風 lowpass + cutoff LFO（11秒周期、中心 2000Hz ±400Hz）。
+        // パラメータは NoiseGenerator のデフォルト値だが、設定の意図を明示するため敢えて渡す。
+        self.noiseGenerator = NoiseGenerator(
+            format: format,
+            defaultAmplitude: 0.08,
+            filterCutoffCenter: 2000.0,
+            filterCutoffDepthHz: 400.0,
+            filterLfoPeriodSeconds: 11.0
+        )
 
         // offline モードでは attach / connect の前に manual rendering を有効化する必要がある。
         // realtime モードでは何もしない（mainMixerNode は通常通り outputNode 経由でハードウェアへ）。

@@ -17,7 +17,9 @@ import Atomics
 ///    - fade: `currentAmplitude`, `activeTargetAmplitude`, `activeFadeFramesRemaining`, `lastConsumedGeneration`
 ///    - PRNG（L/R 独立）: `prngStateLeft`, `prngStateRight`（xorshift32 の state）
 ///    - Paul Kellet's pink filter state（L/R 独立）: `b0L`..`b6L`, `b0R`..`b6R`
-///    - L/R 独立 PRNG により、左右で相関ゼロの真ステレオピンクノイズを生成する。
+///    - 1-pole IIR lowpass state（L/R 独立）: `lpL`, `lpR`
+///    - Filter cutoff LFO 位相（L/R 共通）: `filterLfoPhase`
+///    - L/R 独立 PRNG / pink filter / lowpass により、左右で相関ゼロの真ステレオを生成する。
 ///
 /// 2. **Main writer / Audio reader（pending command）** — 全 atomic
 ///    - `pendingTargetAmplitudeBits` / `pendingFadeFrames` / `pendingGeneration`
@@ -45,7 +47,20 @@ final class NoiseRenderState {
     let sampleRate: Double
 
     /// 定常状態の基本振幅。Drone (0.2) より控えめにして混ぜたときに耳ざわりにならない量。
+    /// lowpass で高域カットして RMS が下がる分、Task 11 時点の 0.05 から少し上げる想定。
     let defaultAmplitude: Float
+
+    // MARK: - 定数 — Lowpass + cutoff LFO
+
+    /// Lowpass cutoff の中心周波数（Hz）。filter LFO がこの周辺で揺らぐ。
+    let filterCutoffCenter: Double
+
+    /// Lowpass cutoff の LFO 深さ（Hz、±この値）。
+    let filterCutoffDepthHz: Double
+
+    /// Filter cutoff LFO の 1 サンプルあたり位相増分（ラジアン）。
+    /// `2π / (filterLfoPeriodSeconds × sampleRate)`。period=0 で 0（実質無効化）。
+    let filterLfoPhaseIncrement: Double
 
     // MARK: - Audio thread 単一所有 — fade
 
@@ -89,6 +104,20 @@ final class NoiseRenderState {
     var b5R: Float = 0.0
     var b6R: Float = 0.0
 
+    // MARK: - Audio thread 単一所有 — Lowpass + cutoff LFO
+
+    /// L チャネル 1-pole IIR lowpass の前回出力（state）。
+    /// `lp += α × (input - lp)` の `lp`。
+    var lpL: Float = 0.0
+
+    /// R チャネル 1-pole IIR lowpass の state。
+    var lpR: Float = 0.0
+
+    /// Filter cutoff LFO の現在位相（ラジアン）。
+    /// 1 ブロックごとに `filterLfoPhaseIncrement × frameCount` だけ加算して 2π 折り返し。
+    /// L/R 共通の LFO（雨音の密度変化は左右で同じ方向に動く想定）。
+    var filterLfoPhase: Double = 0.0
+
     // MARK: - Main writer / Audio reader（pending command, 全 atomic）
 
     /// 次の fade で目指す振幅（Float の bitPattern を保持）。
@@ -105,9 +134,26 @@ final class NoiseRenderState {
 
     /// - Parameters:
     ///   - sampleRate: レンダリングのサンプルレート（Hz）。
-    ///   - defaultAmplitude: 定常時の基本振幅（0.0〜1.0）。既定は 0.05（Drone 0.2 の 1/4）。
-    init(sampleRate: Double, defaultAmplitude: Float = 0.05) {
+    ///   - defaultAmplitude: 定常時の基本振幅（0.0〜1.0）。既定は 0.08（lowpass で高域カット
+    ///     する分の RMS 補正を含む）。
+    ///   - filterCutoffCenter: Lowpass cutoff の中心周波数（Hz）。既定 2000Hz で「雨音」の中域。
+    ///   - filterCutoffDepthHz: Lowpass cutoff の LFO 深さ（±Hz）。既定 400Hz。
+    ///   - filterLfoPeriodSeconds: Filter cutoff LFO の周期（秒）。既定 11 秒。0 で LFO 無効。
+    init(
+        sampleRate: Double,
+        defaultAmplitude: Float = 0.08,
+        filterCutoffCenter: Double = 2000.0,
+        filterCutoffDepthHz: Double = 400.0,
+        filterLfoPeriodSeconds: Double = 11.0
+    ) {
         self.sampleRate = sampleRate
         self.defaultAmplitude = defaultAmplitude
+        self.filterCutoffCenter = filterCutoffCenter
+        self.filterCutoffDepthHz = filterCutoffDepthHz
+        if filterLfoPeriodSeconds > 0 {
+            self.filterLfoPhaseIncrement = 2.0 * Double.pi / (filterLfoPeriodSeconds * sampleRate)
+        } else {
+            self.filterLfoPhaseIncrement = 0.0
+        }
     }
 }

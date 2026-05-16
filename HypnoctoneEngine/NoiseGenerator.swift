@@ -2,11 +2,12 @@ import AVFoundation
 import Atomics
 import os
 
-/// Sleep モード用のピンクノイズを生成する。
+/// Sleep モード用の整形ピンクノイズ（雨音風）を生成する。
 ///
 /// `DroneGenerator` と並列に `mainMixerNode` に attach され、Drone（持続音）の上に
-/// ピンクノイズを重ねる音響レイヤー。雨音的な耳触りの良い帯域分布を持ち、
-/// Sleep アプリの定番要素として加える。
+/// 雨音風のノイズを重ねる音響レイヤー。Paul Kellet's filter で生成したピンクノイズに
+/// 1-pole IIR lowpass を通して高域を抑え、cutoff を超低周波 LFO（11 秒周期）で
+/// ゆるく揺らすことで雨粒密度の自然な変化を模倣する。Sleep アプリの定番要素。
 ///
 /// 構造・スレッドモデル・fade ロジック（odd/even seqlock）は `DroneGenerator` と同形式。
 /// 共通化はせず別クラスとして実装する（3 つ目の Generator が出てきたら refactor 検討）。
@@ -20,6 +21,11 @@ import os
 /// xorshift32 PRNG でホワイトノイズを生成し、Paul Kellet's 7 段 IIR filter で
 /// ピンクスペクトラム（約 -3dB/oct）に整形する。係数は定数。
 /// L/R で独立した PRNG seed と filter state を使い、相関ゼロの真ステレオノイズを生成する。
+///
+/// ## 雨音風 lowpass
+/// ピンクノイズの後に 1-pole IIR lowpass を L/R 別に適用して高域を抑制し、
+/// cutoff 周波数を超低周波 LFO（既定 11 秒周期、中心 2000Hz、±400Hz）で揺らす。
+/// 「シャワー」「シャラシャラ」のような自然な帯域変化を作る。LFO は L/R 共通。
 ///
 /// ## fade ロジック（odd/even seqlock）
 /// `DroneGenerator` と同じプロトコル。詳細は `ToneRenderState` のコメント参照。
@@ -55,17 +61,26 @@ final class NoiseGenerator {
     /// - Parameters:
     ///   - format: source node の出力フォーマット。`AudioEngineController` 側で一度
     ///             生成済みのものを共有する（Drone と同じ format）。
-    ///   - defaultAmplitude: 定常時の振幅（0.0〜1.0）。既定は 0.05。
+    ///   - defaultAmplitude: 定常時の振幅（0.0〜1.0）。既定は 0.08（lowpass 補正含む）。
+    ///   - filterCutoffCenter: Lowpass cutoff の中心周波数（Hz）。既定 2000Hz（雨音中域）。
+    ///   - filterCutoffDepthHz: Cutoff LFO 深さ（±Hz）。既定 400Hz。
+    ///   - filterLfoPeriodSeconds: Cutoff LFO 周期（秒）。既定 11 秒。
     init(
         format: AVAudioFormat,
-        defaultAmplitude: Float = 0.05
+        defaultAmplitude: Float = 0.08,
+        filterCutoffCenter: Double = 2000.0,
+        filterCutoffDepthHz: Double = 400.0,
+        filterLfoPeriodSeconds: Double = 11.0
     ) {
         self.sourceFormat = format
         self.sampleRate = format.sampleRate
         self.defaultAmplitude = defaultAmplitude
         self.renderState = NoiseRenderState(
             sampleRate: format.sampleRate,
-            defaultAmplitude: defaultAmplitude
+            defaultAmplitude: defaultAmplitude,
+            filterCutoffCenter: filterCutoffCenter,
+            filterCutoffDepthHz: filterCutoffDepthHz,
+            filterLfoPeriodSeconds: filterLfoPeriodSeconds
         )
 
         // closure 内で参照するために local capture（self を捕捉しない）。
@@ -95,18 +110,36 @@ final class NoiseGenerator {
                 }
             }
 
+            // ---- ブロック先頭で cutoff LFO → 1-pole lowpass の係数 α を計算 ----
+            //
+            // 1-pole IIR lowpass: y[n] = y[n-1] + α × (x[n] - y[n-1])
+            //   α = 1 - exp(-2π × cutoff / sampleRate)
+            // これは analog RC の時定数を digital 1-pole に matching する標準的な簡易式で、
+            // approximately -3dB at cutoff Hz（厳密な digital -3dB 一致ではないが、
+            // 今回の cutoff 範囲 1600〜2400Hz @ 44.1kHz では実用上問題ない）。
+            // LFO は超低周波 (周期 11s) なのでブロック単位 (realtime 256frames=5.8ms /
+            // offline 4096frames=93ms どちらでも) の更新で精度十分。
+            // sin/exp を 1 ブロックあたり 1 回ずつ呼ぶだけなので audio thread 負荷も極小。
+            var filterLfoPhase = state.filterLfoPhase
+            let cutoff = state.filterCutoffCenter + state.filterCutoffDepthHz * sin(filterLfoPhase)
+            // cutoff は理論上 [center-depth, center+depth] の範囲だが念のため正値クランプ。
+            let cutoffClamped = max(20.0, min(cutoff, state.sampleRate / 2.0 - 100.0))
+            let alpha = Float(1.0 - exp(-2.0 * Double.pi * cutoffClamped / state.sampleRate))
+
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             var amplitude = state.currentAmplitude
             let target = state.activeTargetAmplitude
             var framesRemaining = state.activeFadeFramesRemaining
 
-            // L/R 独立の PRNG state / pink filter state をローカル変数に移す。
+            // L/R 独立の PRNG state / pink filter state / lowpass state をローカル変数に移す。
             var prngL = state.prngStateLeft
             var prngR = state.prngStateRight
             var b0L = state.b0L, b1L = state.b1L, b2L = state.b2L, b3L = state.b3L
             var b4L = state.b4L, b5L = state.b5L, b6L = state.b6L
             var b0R = state.b0R, b1R = state.b1R, b2R = state.b2R, b3R = state.b3R
             var b4R = state.b4R, b5R = state.b5R, b6R = state.b6R
+            var lpL = state.lpL
+            var lpR = state.lpR
 
             // stereo: 2 buffer (L=0, R=1) / mono fallback: 1 buffer に (L+R)/2 を書く。
             let isStereo = ablPointer.count >= 2
@@ -151,8 +184,12 @@ final class NoiseGenerator {
                 let pinkR = (b0R + b1R + b2R + b3R + b4R + b5R + b6R + whiteR * 0.5362) * 0.11
                 b6R = whiteR * 0.115926
 
-                let sampleL = pinkL * amplitude
-                let sampleR = pinkR * amplitude
+                // 1-pole IIR lowpass を L/R 別に適用（雨音風の柔らかい音色）。
+                lpL += alpha * (pinkL - lpL)
+                lpR += alpha * (pinkR - lpR)
+
+                let sampleL = lpL * amplitude
+                let sampleR = lpR * amplitude
 
                 if isStereo {
                     bufferL[frame] = sampleL
@@ -160,6 +197,13 @@ final class NoiseGenerator {
                 } else {
                     bufferL[frame] = (sampleL + sampleR) * 0.5
                 }
+            }
+
+            // Filter LFO phase をブロック分進めて 2π 折り返し。
+            filterLfoPhase += state.filterLfoPhaseIncrement * Double(frameCount)
+            let twoPi = 2.0 * Double.pi
+            if filterLfoPhase >= twoPi {
+                filterLfoPhase = filterLfoPhase.truncatingRemainder(dividingBy: twoPi)
             }
 
             // 更新後の state を書き戻す。
@@ -171,6 +215,9 @@ final class NoiseGenerator {
             state.b4L = b4L; state.b5L = b5L; state.b6L = b6L
             state.b0R = b0R; state.b1R = b1R; state.b2R = b2R; state.b3R = b3R
             state.b4R = b4R; state.b5R = b5R; state.b6R = b6R
+            state.lpL = lpL
+            state.lpR = lpR
+            state.filterLfoPhase = filterLfoPhase
             return noErr
         }
     }
