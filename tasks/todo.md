@@ -90,5 +90,17 @@ Task 0〜4（Xcode プロジェクト / 最小UI / AudioEngineController / AVAud
 - [x] Phase 5: offline render を fadeIn → 定常 → fadeOut の 3 段に。総フレーム +bufferCapacity の余裕で fade-out 確実完了（Codex 指摘 4 反映）
 - [x] Phase 6: codemagic.yaml の duration 検証を >= 3.5s に
 - [x] Phase 7: Codex レビュー → 指摘 (1)(2)(3)(4) を反映
-- [ ] Task 5 push → Codemagic 実走 → artifacts_004 で fade 形状を波形ビューアで確認、実機で click 音が出ないか実聴
+- [x] Task 5 push → Codemagic 実走 → artifacts_004 で fade 形状を確認（生サンプル解析で線形減衰を実証、終端は完全無音）
 - [ ] 後続課題 (Codex 指摘 5): `controller.start()` を Bool 返却にして AudioViewModel が失敗時に isPlaying をロールバックする整合性改善（Task 5 のスコープ外）
+
+## Task 6 — DroneGenerator 分離
+
+- [x] Phase 1: DroneGenerator.swift 新規作成（ToneRenderState 内包、AVAudioSourceNode 構築、scheduleFade* API、220Hz デフォルト）
+- [x] Phase 2: ToneRenderState を DroneGenerator の内部実装として位置付け（ファイルは残置）
+- [x] Phase 3: AudioEngineController を DroneGenerator 経由に refactor、WAV 名 sine-440hz.wav → drone.wav に変更
+- [x] Phase 4: Codex レビュー → 指摘 (3)(4)(5) を反映
+      - `currentTargetAmplitude` → `hasAudibleTarget: Bool` の意味 API に変更
+      - `scheduleFadeIn/Out(duration: TimeInterval)` に変更（Generator が sampleRate を持つので Controller 側の frame 換算が不要）
+      - stale comment 2 箇所修正
+- [ ] Phase 5: push → CI → artifacts_005 で 220Hz WAV 確認、波形が低音化していること & fade 形状維持を実証
+- [ ] **High 後続課題 (Codex 指摘 1)**: ToneRenderState の `fadeFramesRemaining` は main 書き / audio 書き戻しの両方が起きており data race。fade 中に main の scheduleFade* が呼ばれると audio thread の書き戻しで上書きされる可能性。pending（main 書き専用）/ active（audio 書き専用）に分離するか Swift Atomics 導入を検討。Task 7 着手前に対応推奨

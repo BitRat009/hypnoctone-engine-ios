@@ -3,27 +3,28 @@ import os
 
 /// UI から音響処理を分離するためのコントローラ。
 ///
-/// `AVAudioEngine` と `AVAudioSourceNode` を保持し、440Hz のサイン波を
-/// リアルタイム生成する。音声ファイル・録音素材・ループ素材は一切使わない。
+/// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
+/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` に委譲する。
+/// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
 /// ## 想定する呼び出しスレッド
 /// クラス全体を `@MainActor` で隔離し、`start()` / `stop()` / `setVolume(_:)` を含む
 /// 全 public/internal メソッドはメインスレッドからのみ呼ぶ。render block のみ
-/// オーディオスレッドで動くが、render block 内では `ToneRenderState` の値を
+/// オーディオスレッドで動くが、render block 内では `DroneGenerator` の内部 state を
 /// 直接読み書きするだけで本クラスのメソッドは呼ばない。
 ///
 /// ## フェード（Task 5）
 /// `start()` で 0.8 秒の fade-in、`stop()` で 0.8 秒の fade-out を行う。
-/// サンプル単位の線形補間を `ToneRenderState` の `currentAmplitude` に対して
-/// render block 内で行う。`stop()` は fade-out 完了まで待ってから engine を止めるため
-/// 内部で `Task { @MainActor in ... }` を起動し、`Task.sleep(0.8s)` 後に engine.stop()。
-/// fade-out 中に `start()` が呼ばれた場合は保留中の停止タスクを取り消す。
-/// Stop 連打時のレース対策として世代番号（`stopGeneration`）で識別する。
+/// 補間ロジックは `DroneGenerator` の render block 内。`stop()` は fade-out 完了まで
+/// 待ってから engine を止めるため `Task { @MainActor in ... }` を内部で起動し、
+/// `Task.sleep(0.8s)` 後に engine.stop()。fade-out 中に `start()` が呼ばれた場合は
+/// 保留中の停止タスクを取り消す。Stop 連打時のレース対策として世代番号
+/// （`stopGeneration`）で識別する。
 ///
 /// ## CI モード
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
-/// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sine-440hz.wav に書き出す。
+/// 「fade-in → 定常 → fade-out」を含む WAV を Documents/drone.wav に書き出す。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
@@ -35,7 +36,7 @@ final class AudioEngineController {
     enum Mode {
         /// リアルタイムでスピーカに出力する通常モード。
         case realtime
-        /// CoreAudio HAL を一切触らず offline で render し、Documents/sine-440hz.wav に書く。
+        /// CoreAudio HAL を一切触らず offline で render し、Documents/drone.wav に書く。
         case offlineToWAV
     }
 
@@ -51,9 +52,10 @@ final class AudioEngineController {
     // MARK: - 内部プロパティ
 
     private let engine = AVAudioEngine()
-    private let renderState: ToneRenderState
-    private var sourceNode: AVAudioSourceNode?
-    private let sourceFormat: AVAudioFormat?
+
+    /// Sleep モード基底音を担う Drone（持続音）生成器。
+    /// 将来 NoiseGenerator / SlowModulator 等を mainMixerNode に並べる土台。
+    private let droneGenerator: DroneGenerator
 
     /// offline モードで manual rendering の有効化に成功したかどうか。
     /// false の場合、`startOfflineRender()` は CoreAudio HAL を触って SIGABRT する
@@ -94,13 +96,9 @@ final class AudioEngineController {
 
     // MARK: - 初期化
 
-    /// - Parameter frequency: 生成するサイン波の周波数（Hz）。既定は 440Hz。
+    /// - Parameter frequency: 生成するサイン波の周波数（Hz）。既定は 220Hz（Drone デフォルト）。
     /// - Parameter mode: 動作モード。`nil` のとき環境変数 `CI_AUTOSTART` の有無で自動判定。
-    init(frequency: Double = 440.0, mode: Mode? = nil) {
-        self.renderState = ToneRenderState(
-            frequency: frequency,
-            sampleRate: renderSampleRate
-        )
+    init(frequency: Double = 220.0, mode: Mode? = nil) {
         let resolvedMode: Mode
         if let mode = mode {
             resolvedMode = mode
@@ -111,15 +109,21 @@ final class AudioEngineController {
         }
         self.mode = resolvedMode
 
-        // 1ch / 44.1kHz / Float32 標準フォーマットをソース・manual rendering 両方で使い回す。
-        self.sourceFormat = AVAudioFormat(
+        // 1ch / 44.1kHz / Float32 標準フォーマット。標準パラメータなので
+        // 実用上 nil にならないが、念のため fatalError でガード。
+        guard let format = AVAudioFormat(
             standardFormatWithSampleRate: renderSampleRate,
             channels: 1
-        )
+        ) else {
+            fatalError("AVAudioFormat(standardFormatWithSampleRate: \(renderSampleRate), channels: 1) returned nil")
+        }
+
+        // DroneGenerator を先に作る（engine の rendering mode とは独立に source node を構築できる）。
+        self.droneGenerator = DroneGenerator(format: format, frequency: frequency)
 
         // offline モードでは attach / connect の前に manual rendering を有効化する必要がある。
         // realtime モードでは何もしない（mainMixerNode は通常通り outputNode 経由でハードウェアへ）。
-        if resolvedMode == .offlineToWAV, let format = sourceFormat {
+        if resolvedMode == .offlineToWAV {
             do {
                 try engine.enableManualRenderingMode(
                     .offline,
@@ -181,9 +185,9 @@ final class AudioEngineController {
                 self.logger.info("stop generation 不一致。finalize をスキップ (mine=\(myGeneration), latest=\(self.stopGeneration))。")
                 return
             }
-            // さらに二重チェック: 再 start で target が 0 でなくなっていれば finalize しない。
-            if self.renderState.targetAmplitude > 0.0 {
-                self.logger.info("fade-out 中に再 start を検知 (target>0)。engine.stop() をスキップ。")
+            // さらに二重チェック: 再 start で target が audible に戻っていれば finalize しない。
+            if self.droneGenerator.hasAudibleTarget {
+                self.logger.info("fade-out 中に再 start を検知 (hasAudibleTarget)。engine.stop() をスキップ。")
                 return
             }
             self.finalizeRealtimeStop()
@@ -245,20 +249,14 @@ final class AudioEngineController {
 
     // MARK: - フェードスケジュール
 
-    /// fade-in をスケジュールする（現在の振幅から `defaultAmplitude` まで線形に上昇）。
-    /// render thread は `fadeFramesRemaining` フレームで `targetAmplitude` へ近づけて行く。
-    /// メインスレッドは render state の現在値（`currentAmplitude` 等）を読まない設計。
+    /// fade-in を `droneGenerator` に依頼する。秒数で渡し、フレーム換算は generator 側。
     private func scheduleFadeIn() {
-        renderState.targetAmplitude = renderState.defaultAmplitude
-        renderState.fadeFramesRemaining = max(1, Int(renderSampleRate * fadeInSeconds))
-        logger.info("fade-in 開始: target=\(self.renderState.defaultAmplitude, privacy: .public) frames=\(self.renderState.fadeFramesRemaining)")
+        droneGenerator.scheduleFadeIn(duration: fadeInSeconds)
     }
 
-    /// fade-out をスケジュールする（現在の振幅から 0 まで線形に下降）。
+    /// fade-out を `droneGenerator` に依頼する。
     private func scheduleFadeOut() {
-        renderState.targetAmplitude = 0.0
-        renderState.fadeFramesRemaining = max(1, Int(renderSampleRate * fadeOutSeconds))
-        logger.info("fade-out 開始: target=0 frames=\(self.renderState.fadeFramesRemaining)")
+        droneGenerator.scheduleFadeOut(duration: fadeOutSeconds)
     }
 
     // MARK: - offline render
@@ -268,10 +266,6 @@ final class AudioEngineController {
     private func startOfflineRender() {
         guard manualRenderingActive else {
             logger.error("manual rendering が有効化されていないため offline render を中止します。")
-            return
-        }
-        guard sourceFormat != nil else {
-            logger.error("sourceFormat が無いため offline render を中止します。")
             return
         }
 
@@ -294,7 +288,7 @@ final class AudioEngineController {
         scheduleFadeIn()
 
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        guard let outputURL = documentsURL?.appendingPathComponent("sine-440hz.wav") else {
+        guard let outputURL = documentsURL?.appendingPathComponent("drone.wav") else {
             logger.error("Documents ディレクトリの解決に失敗しました。")
             return
         }
@@ -398,77 +392,17 @@ final class AudioEngineController {
     // MARK: - セットアップ
 
     /// オーディオグラフを構築する。初期化時に一度だけ呼ぶ。
-    /// realtime / offline どちらでも同じグラフ（mono 44.1kHz Float32）を使う。
+    /// `droneGenerator.sourceNode` を attach し、mainMixerNode に接続する。
     private func buildAudioGraph() {
-        guard let format = sourceFormat else {
-            logger.error("ソースフォーマットの生成に失敗しました。")
-            return
-        }
-
-        let node = makeSourceNode(format: format)
-        self.sourceNode = node
+        let node = droneGenerator.sourceNode
+        let format = droneGenerator.sourceFormat
 
         engine.attach(node)
+        // `mainMixerNode` へアクセスすると outputNode への接続が自動生成される。
+        // manual rendering mode が有効ならハードウェアではなく manual output に向く。
         engine.connect(node, to: engine.mainMixerNode, format: format)
         engine.mainMixerNode.outputVolume = defaultVolume
         engine.prepare()
-    }
-
-    /// サイン波を生成する `AVAudioSourceNode` を作る。
-    ///
-    /// render block 内ではアロケーション・ロック・I/O・UI 更新を行わない。
-    /// `renderState` を強参照でキャプチャするが、`renderState` は他オブジェクトを
-    /// 参照しないため循環参照は発生しない（`self` はキャプチャしない）。
-    ///
-    /// ## 振幅補間（fade）
-    /// メインスレッドは `targetAmplitude` と `fadeFramesRemaining` だけを書き換える。
-    /// render thread はサンプル単位に `(target - current) / framesRemaining` で increment を
-    /// 計算し、`current` を `target` へ近づける。`framesRemaining` を 1 ずつ減らし、0 で
-    /// 補間を止めて `target` に張り付く。これにより 1 ブロック中の target 変更にも自然に追従し、
-    /// 累積誤差で target を越えることもない。
-    private func makeSourceNode(format: AVAudioFormat) -> AVAudioSourceNode {
-        let state = renderState
-
-        return AVAudioSourceNode(format: format) { isSilence, _, frameCount, audioBufferList -> OSStatus in
-            isSilence.pointee = false
-
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-
-            let phaseIncrement = state.phaseIncrement
-            let twoPi = state.twoPi
-            var phase = state.phase
-
-            // ブロック先頭で fade 状態をスナップショット。
-            var amplitude = state.currentAmplitude
-            let target = state.targetAmplitude
-            var framesRemaining = state.fadeFramesRemaining
-
-            for frame in 0..<Int(frameCount) {
-                // フェード残りがあれば 1 サンプル分だけ target に近づける。
-                if framesRemaining > 0 {
-                    let step = (target - amplitude) / Float(framesRemaining)
-                    amplitude += step
-                    framesRemaining -= 1
-                } else {
-                    amplitude = target
-                }
-
-                let sample = Float(sin(phase)) * amplitude
-                phase += phaseIncrement
-                if phase >= twoPi {
-                    phase -= twoPi
-                }
-                for buffer in ablPointer {
-                    let bufferPointer = UnsafeMutableBufferPointer<Float>(buffer)
-                    bufferPointer[frame] = sample
-                }
-            }
-
-            state.phase = phase
-            state.currentAmplitude = amplitude
-            state.fadeFramesRemaining = framesRemaining
-            return noErr
-        }
     }
 
     /// `AVAudioSession` を `.playback` カテゴリで設定し、有効化する。

@@ -9,7 +9,9 @@ import Foundation
 /// ## スレッドモデル
 ///
 /// - `phase` / `currentAmplitude` / `fadeFramesRemaining` は **オーディオスレッドからのみ書き換える**。
-/// - `targetAmplitude` / `pendingFadeFrames` は **メインスレッドが書き、オーディオスレッドが読む**。
+/// - `targetAmplitude` / `fadeFramesRemaining` は **メインスレッドが書き、オーディオスレッドが読み書きする**
+///   （後者は audio thread が減算で更新もする現状実装。Task 6 レビュー時の Codex 指摘により、将来的には
+///   pending/active 分離 + 単一 writer 化が望ましいと判断されている）。
 ///
 /// メインスレッドは render block 内の状態（`currentAmplitude` 等）を読まない設計に寄せている
 /// （Codex レビュー指摘 3 への対応）。fade スケジュールはメインスレッドが「目標振幅」と
