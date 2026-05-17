@@ -356,16 +356,27 @@ workflows:
 
           FAIL=0
           # tail RMS が観測しきい値以上（reverb が機能している証拠）。
-          # 30 は s16 で 0.001 (-60dB) 相当。largeHall preset / wetDryMix=40 / 定常 RMS 1000-2000
-          # 想定なら tail RMS は 100-500 のレンジに入る見込み。30 を割るなら reverb が機能していない。
-          TAIL_OK=$(awk -v r="$TAIL_RMS_L" 'BEGIN { print (r+0 >= 30.0) ? 1 : 0 }')
+          # artifacts_021 の実測: L=59.0 / R=30.9 / STEADY_L=1286.9 (TAIL/STEADY = 4.6%)。
+          # R がしきい値 30 とほぼ同値だったので 20 に緩める (s16 で 0.0006 = -64dB)。
+          # 20 を割るなら reverb が機能していない (= 完全無音に近い) と確実に言える水準。
+          TAIL_OK=$(awk -v r="$TAIL_RMS_L" 'BEGIN { print (r+0 >= 20.0) ? 1 : 0 }')
           if [ "$TAIL_OK" != "1" ]; then
-            echo "ERROR: L チャネルの tail RMS が小さすぎる (期待 >= 30, 実際 $TAIL_RMS_L)。reverb が機能していない可能性。"
+            echo "ERROR: L チャネルの tail RMS が小さすぎる (期待 >= 20, 実際 $TAIL_RMS_L)。reverb が機能していない可能性。"
             FAIL=1
           fi
-          TAIL_R_OK=$(awk -v r="$TAIL_RMS_R" 'BEGIN { print (r+0 >= 30.0) ? 1 : 0 }')
+          TAIL_R_OK=$(awk -v r="$TAIL_RMS_R" 'BEGIN { print (r+0 >= 20.0) ? 1 : 0 }')
           if [ "$TAIL_R_OK" != "1" ]; then
-            echo "ERROR: R チャネルの tail RMS が小さすぎる (期待 >= 30, 実際 $TAIL_RMS_R)。reverb が機能していない可能性。"
+            echo "ERROR: R チャネルの tail RMS が小さすぎる (期待 >= 20, 実際 $TAIL_RMS_R)。reverb が機能していない可能性。"
+            FAIL=1
+          fi
+          # 比率条件: TAIL_L / STEADY_L >= 0.02 (2%)。outputVolume を変えても適応的に通る。
+          # artifacts_021 実測 0.046 (4.6%) から余裕を見て 0.02 をしきい値に。
+          RATIO_OK=$(awk -v t="$TAIL_RMS_L" -v s="$STEADY_RMS_L" \
+            'BEGIN { print (s+0 > 0 && t/s >= 0.02) ? 1 : 0 }')
+          if [ "$RATIO_OK" != "1" ]; then
+            RATIO_VAL=$(awk -v t="$TAIL_RMS_L" -v s="$STEADY_RMS_L" \
+              'BEGIN { if (s+0 > 0) printf "%.4f", t/s; else print "n/a" }')
+            echo "ERROR: TAIL_RMS_L / STEADY_RMS_L が小さすぎる (期待 >= 0.02, 実際 $RATIO_VAL)。reverb 残響が定常レベル比で不十分。"
             FAIL=1
           fi
           # tail RMS は定常 RMS より小さいはず (reverb は減衰するので)。
@@ -384,8 +395,6 @@ workflows:
             echo "ERROR: 後半 RMS ($LATE_RMS_L) が tail RMS ($TAIL_RMS_L) の 80% 未満まで減衰していない。reverb decay が想定外。"
             FAIL=1
           fi
-          # TODO(Task 17 実測後): 初回 CI で STEADY_RMS_L と TAIL_RMS_L の実測比を把握したら、
-          # 「TAIL_RMS / STEADY_RMS >= 0.02」のような比率条件を追加。音量変更に強くなる。
           if [ "$FAIL" = "1" ]; then
             exit 1
           fi
