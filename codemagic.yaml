@@ -216,6 +216,22 @@ workflows:
           echo "--- syslog head ---"
           head -200 "$ARTIFACTS_DIR/syslog.log" || true
 
+      - name: "Install ffmpeg (for WAV inspection + reverb tail check)"
+        script: |
+          set -euo pipefail
+          # Codemagic mac_mini-m2 イメージは ffmpeg/ffprobe が未プリインストール。
+          # Task 17 で WAV 検査と reverb tail 検証が必須化されたため、ここで brew install する。
+          # 既にインストール済みなら skip (将来のイメージ変更で同梱されたケースに対応)。
+          if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+            echo "ffmpeg & ffprobe are already available; skipping install."
+          else
+            echo "Installing ffmpeg via Homebrew..."
+            # quiet にしてログを抑える。エラー時は bash の set -e で fail する。
+            brew install ffmpeg
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
       - name: "Verify WAV (offline-rendered Sleep mix: 220Hz Drone + pink noise)"
         script: |
           set -euo pipefail
