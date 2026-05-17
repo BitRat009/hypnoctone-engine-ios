@@ -17,6 +17,8 @@ import os
 /// Task 16 で generative pitch selection を実装したが、聴感調整 (テルミン感) のためユーザー判断で
 /// 現在は **OFF** にしている (`generativePitchEnabled = false`)。コード基盤は残っており、
 /// flag を反転すれば即復活する。
+/// Task 17 で `AVAudioUnitReverb` を mainMixer の後段に挟み、ATMÓS 的な空間的な広がりを付与
+/// (factoryPreset = .largeHall, wetDryMix = 40)。音色や音域は変えず、空間だけ拡張する方針。
 /// 出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
@@ -109,6 +111,13 @@ final class AudioEngineController: ObservableObject {
     /// `mainMixerNode` で Drone と並列にミックスされる。
     private let noiseGenerator: NoiseGenerator
 
+    /// Task 17: mainMixer の後段に挟むリバーブ。ATMÓS 的な「広い空間に漂う」没入感を作る。
+    /// factoryPreset = .largeHall (中〜大ホールの広がり、cathedral 系より自然な減衰)。
+    /// wetDryMix = 40.0 で wet 40% / dry 60% の控えめバランス
+    /// (Drone の音像が後ろに引きすぎず、空間情報だけ載る程度)。
+    /// AVAudioUnit は manual rendering mode と互換なので CI offline render でも動作する。
+    private let reverbNode: AVAudioUnitReverb
+
     /// offline モードで manual rendering の有効化に成功したかどうか。
     /// false の場合、`startOfflineRender()` は CoreAudio HAL を触って SIGABRT する
     /// 可能性があるため何もせず return する（fail-closed）。
@@ -136,11 +145,19 @@ final class AudioEngineController: ObservableObject {
     /// offline モードで一度に render するフレーム数。
     private let offlineMaxFrames: AVAudioFrameCount = 4_096
 
-    /// offline モードで render する総秒数（fade-in + 定常 + fade-out）。
-    /// Task 16 で 4.0s → 16.0s に延長: generative pitch (interval 13-23s) を本番 interval で
-    /// CI 検証するため。fade-in 0.8s + 定常 14.4s + fade-out 0.8s = 16.0s。
-    /// CI WAV サイズ 4 倍 (~3MB)、ビルド時間 +12s 程度のトレードオフ。
-    private let offlineRenderSeconds: Double = 16.0
+    /// offline モードで render する総秒数（fade-in + 定常 + fade-out + reverb tail）。
+    /// Task 16 で 4.0s → 16.0s に延長 (generative pitch 検証用)。
+    /// Task 17 で 16.0s → 18.0s に再延長: AVAudioUnitReverb の tail (~1.5s) を捉えるための余裕。
+    /// 構造: fade-in 0.8s + 定常 14.4s + fade-out 0.8s + reverb tail 2.0s = 18.0s。
+    /// なお実 WAV 長は `totalFrames = baseTotalFrames + buffer.frameCapacity` の影響で
+    /// 約 18.09s になる (render block snapshot 遅延を吸収するための末尾余裕)。
+    /// reverb tail 区間 (16.0〜18.0s) で「fade-out 後にも残響が続いている」ことを CI で検証する。
+    private let offlineRenderSeconds: Double = 18.0
+
+    /// fade-out 完了から WAV 末尾までの reverb tail 区間 (秒)。
+    /// `offlineRenderSeconds - (fadeIn + 定常 + fadeOut)` で算出され、CI 検証側の
+    /// tail 観察区間 (>= 16.0s) と一致する。
+    private let reverbTailSeconds: Double = 2.0
 
     /// fade-in の所要秒数。
     private let fadeInSeconds: Double = 0.8
@@ -275,6 +292,16 @@ final class AudioEngineController: ObservableObject {
             envelopeDepth: envelopeDepth,
             envelopeInitialPhase: envelopeInitialPhase
         )
+
+        // Task 17: ATMÓS 的な空間広がりのためのリバーブ。
+        // `.largeHall` は中〜大ホール (RT60 数秒) の自然な減衰で、cathedral 系より響き
+        // 過ぎず Drone の輪郭が残る。wetDryMix=40 は wet 40% / dry 60% の控えめバランス。
+        // 音量に対する影響: wet 成分はエネルギーを時間軸に分散するため peak はほぼ同等、
+        // RMS は最大で +20〜30% 程度上昇。既存の mainMixer.outputVolume = 0.5 で十分。
+        let reverb = AVAudioUnitReverb()
+        reverb.loadFactoryPreset(.largeHall)
+        reverb.wetDryMix = 40.0
+        self.reverbNode = reverb
 
         // offline モードでは attach / connect の前に manual rendering を有効化する必要がある。
         // realtime モードでは何もしない（mainMixerNode は通常通り outputNode 経由でハードウェアへ）。
@@ -559,12 +586,16 @@ final class AudioEngineController: ObservableObject {
             return false
         }
 
-        // fade-out 開始地点（総尺 - fade-out 秒数）。
+        // fade-out 開始地点。Task 17 で reverb tail を末尾 `reverbTailSeconds` 秒に確保するため、
+        // 「総尺 - tail - fade-out」を起点にする。つまり構造は:
+        //   0〜0.8s: fade-in / 0.8〜15.2s: 定常 / 15.2〜16.0s: fade-out / 16.0〜18.0s: tail。
         // render block 内のスナップショット遅延（最大 frameCapacity フレーム）を吸収するため、
-        // 総フレーム数に余裕（+ frameCapacity）を足して fade-out が確実に 0 へ到達するようにする。
+        // 総フレーム数に余裕（+ frameCapacity）を足して fade-out + tail が確実に末尾まで届くようにする。
         let baseTotalFrames = AVAudioFrameCount(renderSampleRate * offlineRenderSeconds)
         let totalFrames = baseTotalFrames + buffer.frameCapacity
-        let fadeOutStartFrame = AVAudioFrameCount(renderSampleRate * (offlineRenderSeconds - fadeOutSeconds))
+        let fadeOutStartFrame = AVAudioFrameCount(
+            renderSampleRate * (offlineRenderSeconds - reverbTailSeconds - fadeOutSeconds)
+        )
         var rendered: AVAudioFrameCount = 0
         var fadeOutScheduled = false
         var transientRetries = 0
@@ -653,6 +684,8 @@ final class AudioEngineController: ObservableObject {
     /// オーディオグラフを構築する。初期化時に一度だけ呼ぶ。
     /// 多声 Drone（基音/5度/オクターブ）と Noise の sourceNode をすべて attach し、
     /// `mainMixerNode` に並列接続する（複数 source → mixer の和音構成）。
+    /// Task 17: mainMixer の後段に AVAudioUnitReverb を挟む
+    /// (`mixer → reverb → outputNode`)。realtime / offline のどちらでも同じグラフ。
     private func buildAudioGraph() {
         // 全 generator が共有する format（`droneGenerators` の各要素も同じ format で構築済み）。
         let format = noiseGenerator.sourceFormat
@@ -666,6 +699,18 @@ final class AudioEngineController: ObservableObject {
         }
         engine.attach(noiseGenerator.sourceNode)
         engine.connect(noiseGenerator.sourceNode, to: engine.mainMixerNode, format: format)
+
+        // Task 17: mainMixer → reverb → outputNode に切り替える。
+        // mainMixerNode へのアクセスで暗黙的に outputNode への接続が生成されているので、
+        // それを `disconnectNodeOutput` で切ってから reverb を挟む。
+        // effect 入力 (mixer → reverb) は generator と同じ stereo 44.1kHz format を明示し、
+        // 後段 (reverb → output) は output hardware (realtime で 48kHz 等になる可能性) に
+        // 任せるため `format: nil`。offline 時は manualRenderingFormat が format と一致する。
+        engine.attach(reverbNode)
+        engine.disconnectNodeOutput(engine.mainMixerNode)
+        engine.connect(engine.mainMixerNode, to: reverbNode, format: format)
+        engine.connect(reverbNode, to: engine.outputNode, format: nil)
+
         engine.mainMixerNode.outputVolume = defaultVolume
         engine.prepare()
     }

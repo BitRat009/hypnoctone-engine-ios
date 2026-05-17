@@ -498,3 +498,41 @@ Step 3 で SUB、Step 4 で GRAIN、Step 5 で 4 モードに進む計画。
       - 結果: Task 14 (倍音 + envelope) + Task 15 (Note UI 表示) 状態に。
         WAV 尺 16s は維持 (envelope 1/3 周期分の動きが観察可能)
 - [ ] 再 push → 検証 (artifacts_020): 静的 Task 14 + UI 表示の状態に戻る確認
+
+## Task 17 — ATMÓS 化 Step 3: リバーブ/空間処理 (AVAudioUnitReverb)
+
+Task 16 で「音色や音域は触らず空間だけ拡張する」方向に転換。AVAudioUnitReverb を
+mainMixer の後段に挟むことで、Drone/Noise の音色は維持しつつ「広い空間に漂う」
+ATMÓS 的な没入感を出す。
+
+### 設計
+
+- グラフ変更: `[Drone × 3 + Noise] → mainMixerNode → reverbNode → outputNode`
+  - mainMixerNode が自動接続する outputNode への接続を `disconnectNodeOutput` で切ってから挟む
+  - reverbNode は AVAudioUnitReverb (factoryPreset=.largeHall, wetDryMix=40)
+- offline render の WAV 総尺を 16s → 18s に延長
+  - reverb tail (≒1.5〜2s) を捉えるための余裕
+  - fade-out 0.8s 後の 1.2s 区間で残響を観察可能に
+- AVAudioUnit は manual rendering mode と互換。ただし `attach/connect` のタイミングは
+  既存の Drone/Noise と同じく `enableManualRenderingMode` の後
+
+### Phase
+
+- [ ] Phase 1: AudioEngineController に reverbNode (AVAudioUnitReverb) 追加
+      - factoryPreset = .largeHall、wetDryMix = 40.0 を init で設定
+      - buildAudioGraph: mixer → outputNode の自動接続を disconnect し、mixer → reverb → output に
+      - クラスドキュメントを更新（グラフ構成、reverb パラメータ、Headroom 影響）
+- [ ] Phase 2: offline render を reverb tail 対応に拡張
+      - offlineRenderSeconds 16.0 → 18.0 (fade-out 0.8s 後にさらに 1.2s tail を残す)
+      - reverb 内部の遅延も totalFrames の余裕 (+frameCapacity) でカバー
+- [ ] Phase 3: codemagic.yaml の WAV 検査を 18s + tail 検証に拡張
+      - duration >= 15.0s → >= 17.9s (実 WAV は約 18.09s 出る想定)
+      - tail 検証: 16.0〜17.5s 区間の RMS が一定しきい値 (>= 30) 以上で「fade-out 後も残響あり」を実証
+      - LATE 検証: 17.8〜18.0s 区間の RMS が tail RMS の 80% 未満まで減衰しているか
+      - ffmpeg `atrim=start=16:end=17.5` + RMS 計測の追加
+- [ ] Phase 4: Codex レビュー（mainMixer disconnect の妥当性、reverb の manual rendering 互換性、
+      Headroom の peak/RMS 変化、tail の検査ロジック）
+- [ ] Phase 5: push → CI → artifacts_021 検証
+      - WAV stereo 18s、L/R 検査クリア、crash 無し
+      - 0.1s 窓 RMS で「fade-out 完了 16.0s 以降にも残響 RMS が観測される」ことを実証
+      - 実機聴取で「空間に漂う」感の獲得を確認

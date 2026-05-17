@@ -246,13 +246,14 @@ workflows:
             echo "ERROR: チャネル数が想定 (2 = stereo) と違う: $CHANNELS"
             FAIL=1
           fi
-          # Task 16 で WAV を 16s に延長（generative pitch を本番 interval で CI 検証するため）。
-          # fade-in 0.8s + 定常 14.4s + fade-out 0.8s = 16.0 秒分 render する想定。
-          # 誤差を見越して 15.0 秒以上を要求。
+          # Task 17 で WAV を 18s に延長（reverb tail 区間 2.0s を末尾に確保するため）。
+          # 構造: fade-in 0.8s + 定常 14.4s + fade-out 0.8s + reverb tail 2.0s = 18.0 秒。
+          # 実際は totalFrames に + frameCapacity の余裕を足しているので約 18.09s 出る想定。
+          # tail 区間 (16.0〜17.5s) を検査するため最低でも 17.9s を要求。
           # awk で float 比較（bash の test では浮動小数比較ができない）。
-          DURATION_OK=$(awk -v d="$DURATION" 'BEGIN { print (d+0 >= 15.0) ? 1 : 0 }')
+          DURATION_OK=$(awk -v d="$DURATION" 'BEGIN { print (d+0 >= 17.9) ? 1 : 0 }')
           if [ "$DURATION_OK" != "1" ]; then
-            echo "ERROR: duration が短すぎる (期待 >= 15.0s, 実際 $DURATION s)"
+            echo "ERROR: duration が短すぎる (期待 >= 17.9s, 実際 $DURATION s)"
             FAIL=1
           fi
           # ---- L/R それぞれが無音でない、かつ L != R であることを確認 ----
@@ -288,7 +289,91 @@ workflows:
           if [ "$FAIL" = "1" ]; then
             exit 1
           fi
-          echo "OK: sleep-mix.wav は 44.1kHz / stereo (2ch) / >= 15.0s / L≠R の妥当な WAV です。"
+          echo "OK: sleep-mix.wav は 44.1kHz / stereo (2ch) / >= 17.9s / L≠R の妥当な WAV です。"
+
+      - name: "Verify reverb tail (Task 17: post-fade-out residual energy)"
+        script: |
+          set -euo pipefail
+          # Task 17: mainMixer → AVAudioUnitReverb → output グラフの reverb tail を検証する。
+          # WAV 構造: 0〜0.8s fade-in / 0.8〜15.2s 定常 / 15.2〜16.0s fade-out / 16.0〜18.0s tail。
+          # → 16.0〜17.5s 区間は「素の信号は 0、reverb の残響のみ」が記録されているはず。
+          # reverb が機能していれば tail RMS は十分に観測可能な値 (>= 30, s16 で 0.001)。
+          # reverb が機能していなければ完全無音 (tail RMS ≈ 0) になるので、しきい値で判定できる。
+          # Task 17 検査は CI の信頼性を保つため、ffmpeg/ffprobe が無い場合は fail にする。
+          # (前段の WAV 検査ステップとの整合よりも、reverb tail 観測が確実に行われることを優先)
+          if ! command -v ffprobe >/dev/null 2>&1; then
+            echo "ERROR: ffprobe が見つからない。Task 17 の reverb tail 検査に必須。"
+            exit 1
+          fi
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "ERROR: ffmpeg が見つからない。Task 17 の reverb tail 検査に必須。"
+            exit 1
+          fi
+          WAV="$ARTIFACTS_DIR/sleep-mix.wav"
+          if [ ! -s "$WAV" ]; then
+            echo "ERROR: $WAV が見つからない。"
+            exit 1
+          fi
+
+          # 指定区間の mono RMS (s16le 換算) を測る関数。
+          # atrim_expr 例: "atrim=start=16:end=17.5,asetpts=PTS-STARTPTS"
+          measure_rms_in_range() {
+            local atrim_expr="$1"
+            local pan_expr="$2"
+            ffmpeg -hide_banner -nostats -loglevel error \
+              -i "$WAV" -af "${atrim_expr},pan=mono|${pan_expr}" \
+              -f s16le -acodec pcm_s16le - 2>/dev/null \
+              | od -A n -t d2 -v \
+              | awk 'BEGIN { sum=0; n=0 }
+                     { for (i=1;i<=NF;i++) { v=$i+0; sum += v*v; n++ } }
+                     END { if (n==0) print 0; else printf "%.1f\n", sqrt(sum/n) }'
+          }
+
+          # 定常区間 (10.0〜12.0s): fade-in 完了済み・fade-out 開始前。dry 信号 + reverb 込み。
+          # tail 区間 (16.0〜17.5s): fade-out 完了済み。素信号は 0、reverb tail のみ。
+          # 比較区間 (17.8〜18.0s): tail decay の末尾。tail RMS から更に減衰している想定。
+          STEADY_RMS_L=$(measure_rms_in_range "atrim=start=10.0:end=12.0,asetpts=PTS-STARTPTS" "c0=c0")
+          TAIL_RMS_L=$(measure_rms_in_range "atrim=start=16.0:end=17.5,asetpts=PTS-STARTPTS" "c0=c0")
+          TAIL_RMS_R=$(measure_rms_in_range "atrim=start=16.0:end=17.5,asetpts=PTS-STARTPTS" "c0=c1")
+          LATE_RMS_L=$(measure_rms_in_range "atrim=start=17.8:end=18.0,asetpts=PTS-STARTPTS" "c0=c0")
+          echo "reverb-tail check: STEADY_RMS_L=$STEADY_RMS_L TAIL_RMS_L=$TAIL_RMS_L TAIL_RMS_R=$TAIL_RMS_R LATE_RMS_L=$LATE_RMS_L"
+
+          FAIL=0
+          # tail RMS が観測しきい値以上（reverb が機能している証拠）。
+          # 30 は s16 で 0.001 (-60dB) 相当。largeHall preset / wetDryMix=40 / 定常 RMS 1000-2000
+          # 想定なら tail RMS は 100-500 のレンジに入る見込み。30 を割るなら reverb が機能していない。
+          TAIL_OK=$(awk -v r="$TAIL_RMS_L" 'BEGIN { print (r+0 >= 30.0) ? 1 : 0 }')
+          if [ "$TAIL_OK" != "1" ]; then
+            echo "ERROR: L チャネルの tail RMS が小さすぎる (期待 >= 30, 実際 $TAIL_RMS_L)。reverb が機能していない可能性。"
+            FAIL=1
+          fi
+          TAIL_R_OK=$(awk -v r="$TAIL_RMS_R" 'BEGIN { print (r+0 >= 30.0) ? 1 : 0 }')
+          if [ "$TAIL_R_OK" != "1" ]; then
+            echo "ERROR: R チャネルの tail RMS が小さすぎる (期待 >= 30, 実際 $TAIL_RMS_R)。reverb が機能していない可能性。"
+            FAIL=1
+          fi
+          # tail RMS は定常 RMS より小さいはず (reverb は減衰するので)。
+          DECAY_OK=$(awk -v t="$TAIL_RMS_L" -v s="$STEADY_RMS_L" \
+            'BEGIN { print (t+0 < s+0) ? 1 : 0 }')
+          if [ "$DECAY_OK" != "1" ]; then
+            echo "ERROR: tail RMS ($TAIL_RMS_L) が定常 RMS ($STEADY_RMS_L) より大きい。fade-out が機能していない可能性。"
+            FAIL=1
+          fi
+          # tail 区間自体も末尾に向けて減衰しているはず (LATE が TAIL の 80% 未満)。
+          # tail 検査区間 (16.0〜17.5s) の RMS よりさらに後 (17.8〜18.0s) で減衰していなければ
+          # reverb の減衰が機能していない、または tail が打ち切られていない可能性。
+          LATE_DECAY_OK=$(awk -v late="$LATE_RMS_L" -v tail="$TAIL_RMS_L" \
+            'BEGIN { print (late+0 < (tail+0) * 0.8) ? 1 : 0 }')
+          if [ "$LATE_DECAY_OK" != "1" ]; then
+            echo "ERROR: 後半 RMS ($LATE_RMS_L) が tail RMS ($TAIL_RMS_L) の 80% 未満まで減衰していない。reverb decay が想定外。"
+            FAIL=1
+          fi
+          # TODO(Task 17 実測後): 初回 CI で STEADY_RMS_L と TAIL_RMS_L の実測比を把握したら、
+          # 「TAIL_RMS / STEADY_RMS >= 0.02」のような比率条件を追加。音量変更に強くなる。
+          if [ "$FAIL" = "1" ]; then
+            exit 1
+          fi
+          echo "OK: fade-out 後の reverb tail が L/R 両 ch で観測 + 末尾減衰も確認 (Task 17)。"
 
       - name: Shutdown simulator
         script: |
