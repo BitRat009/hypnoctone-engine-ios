@@ -532,7 +532,52 @@ ATMÓS 的な没入感を出す。
       - ffmpeg `atrim=start=16:end=17.5` + RMS 計測の追加
 - [ ] Phase 4: Codex レビュー（mainMixer disconnect の妥当性、reverb の manual rendering 互換性、
       Headroom の peak/RMS 変化、tail の検査ロジック）
-- [ ] Phase 5: push → CI → artifacts_021 検証
-      - WAV stereo 18s、L/R 検査クリア、crash 無し
-      - 0.1s 窓 RMS で「fade-out 完了 16.0s 以降にも残響 RMS が観測される」ことを実証
-      - 実機聴取で「空間に漂う」感の獲得を確認
+- [x] Phase 5: push → CI → artifacts_021 検証
+      ✓ WAV stereo 18.092880s ✓、L/R 検査クリア (L_MAX=3580, R_MAX=4115, DIFF_MAX=3167)
+      ✓ STEADY_RMS_L=1286.9 / TAIL_RMS_L=59.0 / TAIL_RMS_R=30.9 / LATE_RMS_L=2.0
+      ✓ TAIL/STEADY=4.6% (>= 2% で十分余裕)、LATE/TAIL=3.4% (< 80% で末尾減衰実証)
+      ✓ 実機聴取で「空間に漂う」感を獲得、R 側 tail の薄さも違和感なし (by user)
+      ✓ artifacts_022 で CI しきい値緩和 (TAIL 30→20, ratio 0.02 追加) を実走確認
+
+## Task 18 — ATMÓS 化 Step 4: サブベース (A1 / 55Hz)
+
+ATMÓS 的な重心の低い空間を作るため、既存 3 声 (A3/E4/A4) の下に sub bass voice
+(A1 = 55Hz, amp 0.05) を薄く敷く。Drone は 3 声 → 4 声構成に。倍音 (×2=110Hz / ×3=165Hz)
+が root (220Hz) と自然に音響的に接続する。
+
+### 設計
+
+- `droneIntervals`: `[0, 7, 12]` → `[-24, 0, 7, 12]` (sub を先頭)
+- `droneGenerators` 配列に sub voice を先頭追加 (DroneGenerator 再利用、コード追加最小)
+- sub voice のパラメータ:
+  - frequency: 55Hz (A1 = rootNote - 24 semi)
+  - amp: 0.05 (root 0.15 の 1/3)
+  - LFO 周期: 29.0s (既存 13.7 / 17.3 / 23.1 と素数で揃わない 4 つ目)
+  - LFO depth: 2.0cent (重低音は「うねり」が聴感に出やすいので控えめ)
+  - LFO initialPhase: 3π/2 (既存 0 / π/2 / π と 4 等分位相)
+  - 倍音: 既存と同じ [(×2, 0.2), (×3, 0.1)]
+  - envelope: 既存共通 (37s / ±7.5%)
+- pitchCandidates / pitchIntervals も 4 要素に拡張 (generative 再有効化時の備え)
+  - sub 候補: A1 / B1 / C#2 / E2 (55-82Hz)
+  - sub interval: 31.0s (最ゆっくり、素数)
+- Headroom 再計算: Drone 4 声 0.429 + Noise 0.08 + envelope 1.075 + outputVolume 0.5 → 実効 0.27、reverb wet で +20-30% → 0.34、16bit s16le 換算でも余裕
+
+### Phase
+
+- [x] Phase 1: droneGenerators / droneIntervals に sub bass voice (A1) を先頭追加
+      - pitchCandidates / pitchIntervals も 4 要素化
+      - Headroom コメント更新
+- [x] Phase 2: クラスドキュメント (4 声 / A1 表記 / sub と root の倍音接続) 更新
+- [x] Phase 3: tasks/todo.md に Task 18 計画追記
+- [ ] Phase 4: Codex レビュー
+      - Headroom 計算妥当性 (sub 加算で peak/RMS が outputVolume 0.5 で安全か)
+      - 倍音 110Hz/165Hz と root 220Hz の音響的整合 (うなり / 干渉リスク)
+      - LFO 周期 29s / depth 2cent / initialPhase 3π/2 の選定根拠
+      - sub と reverb tail の相互作用 (低周波 reverb は tail が長く聴こえやすい)
+- [ ] Phase 5: push → CI → artifacts_023 検証
+      - WAV stereo 18.09s、L/R 検査クリア、crash 無し
+      - L_MAX/R_MAX の上昇幅 (sub 追加で +500-1000 程度想定)
+      - 0.1s 窓 max-abs で「fade-in 中も 55Hz が出ている」確認
+      - 手動 Goertzel で 55Hz / 110Hz / 165Hz / 220Hz の各ピーク観察
+      - reverb tail (TAIL_RMS) が増える方向 (sub の長い tail 効果)
+      - 実機聴取で「重心が下がった」感を確認

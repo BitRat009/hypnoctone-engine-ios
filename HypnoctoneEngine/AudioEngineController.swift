@@ -5,20 +5,22 @@ import os
 /// UI から音響処理を分離するためのコントローラ。
 ///
 /// `AVAudioEngine` のライフサイクル管理（start / stop / fade スケジューリング）と
-/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 3 声
-/// （rootNote + 5度 + オクターブ、平均律 12 TET、L/R 微小 detune、各声に独立 LFO で pitch vibrato、
-///  各声に第 2 / 第 3 倍音で楽器的温かみ）と
+/// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 4 声
+/// （sub bass + rootNote + 5度 + オクターブ、平均律 12 TET、L/R 微小 detune、各声に独立 LFO で
+///  pitch vibrato、各声に第 2 / 第 3 倍音で楽器的温かみ）と
 /// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
 /// `mainMixerNode` で並列ミックスする。全 generator に同じ envelope LFO（37 秒周期 / ±7.5%）を
 /// 適用して「全体が一緒に呼吸」する呼吸感を作る。
 /// 周波数は `Note` (MIDI 番号ベース) で扱い、UI に音名 (A3 / E4 / A4 等) を表示できる
-/// 基盤を持つ (Task 15)。デフォルト音域は A3 / E4 / A4 (220 / 329.63 / 440 Hz)、
+/// 基盤を持つ (Task 15)。デフォルト音域は A1 / A3 / E4 / A4 (55 / 220 / 329.63 / 440 Hz)、
 /// 倍音 ×2/×3 で更に上の帯域までカバー。
 /// Task 16 で generative pitch selection を実装したが、聴感調整 (テルミン感) のためユーザー判断で
 /// 現在は **OFF** にしている (`generativePitchEnabled = false`)。コード基盤は残っており、
 /// flag を反転すれば即復活する。
 /// Task 17 で `AVAudioUnitReverb` を mainMixer の後段に挟み、ATMÓS 的な空間的な広がりを付与
 /// (factoryPreset = .largeHall, wetDryMix = 40)。音色や音域は変えず、空間だけ拡張する方針。
+/// Task 18 で sub bass (A1 = 55Hz, amp 0.05) を 4 声目として先頭に追加し、ATMÓS 的な重心の低い
+/// 空間を作る。sub の倍音 (110Hz / 165Hz) が root (220Hz) と自然に音響的に接続する。
 /// 出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
@@ -41,9 +43,10 @@ import os
 /// ## CI モード
 /// 環境変数 `CI_AUTOSTART` が設定されている場合、CoreAudio HAL に依存しない
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
-/// 「fade-in → 定常 → fade-out」を含む WAV を Documents/sleep-mix.wav に書き出す。
-/// WAV には Drone 3 声（A3 220 / E4 329.63 / A4 440 Hz 固定、平均律、L/R 微小 detune）+ Noise（ピンクノイズ、L/R 独立）が
-/// mixer でミックスされた 2ch stereo として記録される。
+/// 「fade-in → 定常 → fade-out + reverb tail」を含む WAV を Documents/sleep-mix.wav に書き出す。
+/// WAV には Drone 4 声（A1 55 / A3 220 / E4 329.63 / A4 440 Hz 固定、平均律、L/R 微小 detune）
+/// + Noise（ピンクノイズ、L/R 独立）が mixer でミックスされ、AVAudioUnitReverb (.largeHall)
+/// を通った 2ch stereo として記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
@@ -68,26 +71,29 @@ final class AudioEngineController: ObservableObject {
     /// 現在の動作モード。
     let mode: Mode
 
-    /// 現在の root note。Drone 3 声はこの note を基準に [+0, +7, +12] semitone で展開される。
+    /// 現在の root note。Drone 4 声はこの note を基準に [-24, +0, +7, +12] semitone で展開される
+    /// (Task 18 で sub bass A1 を追加)。`rootNote.midiNumber >= 24` を満たす必要がある
+    /// (sub voice が MIDI 範囲 0..<128 に収まるため)。
     let rootNote: Note
 
     /// 現在のスケール (将来の generative pitch selection で参照)。
     let scale: Scale
 
-    /// 現在鳴っている Drone 3 声の note 群（UI 表示用、Task 16 から動的に変化）。
-    /// 初期値は [root, root+7 (5th), root+12 (octave)]。PitchScheduler が時間軸で
-    /// 候補リストから選び直すたびに更新される。
+    /// 現在鳴っている Drone 4 声の note 群（UI 表示用、Task 16 から動的に変化）。
+    /// 初期値は [root-24 (sub), root, root+7 (5th), root+12 (octave)]。PitchScheduler が
+    /// 時間軸で候補リストから選び直すたびに更新される。
     @Published private(set) var currentDroneNotes: [Note]
 
     // MARK: - PitchScheduler (Task 16: ATMÓS 化 Step 2 — generative pitch selection)
 
     /// 各 voice の note 候補リスト。PitchScheduler がここから「現在 note を除いた」中から
-    /// ランダム選択する。3 voices (root / 5th / octave) × 4 候補。Scale 内に収める設計。
+    /// ランダム選択する。4 voices (sub / root / 5th / octave) × 4 候補。Scale 内に収める設計。
     private let pitchCandidates: [[Note]]
 
-    /// 各 voice の pitch 切替 interval（秒）。素数寄りで揃わない（Task 11 LFO と同じ思想）。
+    /// 各 voice の pitch 切替 interval（秒）。互いに約分しにくい値で揃わない（Task 11 LFO と同じ思想）。
     /// CI (offlineToWAV) モードでは × 0.1 にして 4 秒 WAV 内で 2-3 回切替を観測できるようにする。
-    private let pitchIntervals: [Double] = [19.0, 23.0, 13.0]
+    /// Task 18 で sub voice 用に 31.0s を先頭追加 (一番ゆっくり変化)。
+    private let pitchIntervals: [Double] = [31.0, 19.0, 23.0, 13.0]
 
     /// Pitch 切替の glide 時間（秒）。realtime は 3 秒の遅い補間、CI は 0.5 秒で速く確認。
     private let pitchGlideSeconds: Double
@@ -168,8 +174,9 @@ final class AudioEngineController: ObservableObject {
     // MARK: - 初期化
 
     /// - Parameter rootNote: Drone 多声構成の基音 (root)。既定は **A3 (= 220Hz)**。
-    ///   Drone 3 声は [root, root+7semi (5度), root+12semi (octave)] で展開される
-    ///   → デフォルトでは A3 / E4 / A4 (220 / 329.63 / 440 Hz)。
+    ///   Drone 4 声は [root-24semi (sub), root, root+7semi (5度), root+12semi (octave)] で展開される
+    ///   → デフォルトでは A1 / A3 / E4 / A4 (55 / 220 / 329.63 / 440 Hz)。
+    ///   Task 18 で sub bass voice (A1) を追加して ATMÓS 的な重心の低い空間を作る。
     /// - Parameter scale: 音階。既定は A Major Pentatonic。
     /// - Parameter mode: 動作モード。`nil` のとき環境変数 `CI_AUTOSTART` の有無で自動判定。
     init(
@@ -177,10 +184,19 @@ final class AudioEngineController: ObservableObject {
         scale: Scale = .majorPentatonic,
         mode: Mode? = nil
     ) {
+        // Task 18 で sub voice を rootNote - 24 semitone (= 2 オクターブ下) に置くため、
+        // rootNote.midiNumber は最低でも 24 (= C0) 以上である必要がある。default A3 (57) は満たす。
+        // 違反するとここで明確に止まる (Note(midiNumber:) の precondition より読みやすい failure)。
+        // sub (root-24) と octave (root+12) の両端を MIDI 0..<128 に収めるための範囲。
+        // 下限 24 = sub voice の MIDI が >= 0、上限 115 = octave voice の MIDI が <= 127。
+        precondition((24...115).contains(rootNote.midiNumber),
+                     "AudioEngineController: rootNote.midiNumber must be in 24...115 to fit sub (root-24) and octave (root+12) in valid MIDI range. got \(rootNote.midiNumber)")
         self.rootNote = rootNote
         self.scale = scale
-        // 3 声構成: root / root+7semi (5度) / root+12semi (octave)。これが起動時の初期 note。
-        let droneIntervals = [0, 7, 12]
+        // 4 声構成: sub (root-24semi = A1) / root / 5度 (root+7) / octave (root+12)。
+        // sub は Task 18 で追加した重低音レイヤー。既存 3 声の下に薄く敷いて重心を下げる。
+        // sub の倍音 (×2=110Hz / ×3=165Hz) が root (220Hz) と自然に音響的に接続する。
+        let droneIntervals = [-24, 0, 7, 12]
         let initialDroneNotes = droneIntervals.map { Note(midiNumber: rootNote.midiNumber + $0) }
         self.currentDroneNotes = initialDroneNotes
 
@@ -190,7 +206,12 @@ final class AudioEngineController: ObservableObject {
         // ユーザーフィードバック: 「初期のころの静かな方が良い、高音要らない」
         //                       → Task 14 までの静的 drone (倍音 + envelope) 状態に戻す。
         // Step 2 で動的選択を再開するときは startPitchScheduler() を有効化すれば即復活する。
+        // ⚠ 再有効化時の注意 (Task 18 追加): sub voice が独立に動くと root との整数倍関係が
+        // 崩れて和声感や濁りが前に出る可能性。再開時は sub を root に追従させる、または
+        // sub の候補を root に整合した狭い範囲に制限するのが安全。
         self.pitchCandidates = [
+            // sub bass voice (重低音: A1 周辺、55-82Hz) — Task 18 で追加
+            ["A1", "B1", "C#2", "E2"].compactMap(Note.init(name:)),
             // root voice (中音域: A3 周辺、220-330Hz)
             ["A3", "B3", "C#4", "E4"].compactMap(Note.init(name:)),
             // 5th voice (中高音域: E4 周辺、330-494Hz)
@@ -222,22 +243,37 @@ final class AudioEngineController: ObservableObject {
         }
 
         // Generator を先に作る（engine の rendering mode とは独立に source node を構築できる）。
-        // 多声 Drone: 基音 / 完全 5度 / オクターブ。振幅は基音強め、上倍音を弱めて
-        // 自然な厚みを作る。
+        // 多声 Drone: sub bass / 基音 / 完全 5度 / オクターブ。振幅は基音強め、上倍音と sub を
+        // 弱めて自然な厚みを作る。
         //
         // 各声に異なる LFO（pitch vibrato）周期・深さ・初期位相を割り当て、
-        // 3 声のゆらぎが揃わない（時間軸で複雑に変化し続ける）ようにする。周期は素数寄りの
-        // 13.7 / 17.3 / 23.1 秒で、互いに約分しにくい比のため聴感上の繰り返しが目立たない。
+        // 4 声のゆらぎが揃わない（時間軸で複雑に変化し続ける）ようにする。周期は
+        // 13.7 / 17.3 / 23.1 / 29.0 秒で、互いに約分しにくい値の組み合わせのため
+        // 聴感上の繰り返しが目立たない。
         //
-        // Headroom 評価（Task 14 で envelope LFO ±7.5% multiplier 追加）:
-        //   - Drone 3 声 × （基音 + 第2倍音 0.2 + 第3倍音 0.1）= 0.28 × 1.3 = 0.364
-        //   - Noise は Paul Kellet's filter + lowpass の統計信号 ≈ 0.08
-        //   - 合算 ≈ 0.4 → envelope multiplier 最大 1.075 で 0.43 前後
-        //   - mainMixer outputVolume 0.5 を経由するので最終的に 0.22 前後
+        // Headroom 評価（Task 18 で sub bass 追加後、概算）:
+        //   - sub (A1)  amp 0.05  ×  (基音 + 第2 + 第3) 1.3 = 0.065
+        //   - root      amp 0.15  ×  1.3 = 0.195
+        //   - 5度       amp 0.08  ×  1.3 = 0.104
+        //   - octave    amp 0.05  ×  1.3 = 0.065
+        //   - Drone 4 声合算 ≈ 0.429
+        //   - Noise (Paul Kellet's + lowpass 統計信号) ≈ 0.08
+        //   - 合算 ≈ 0.51 → envelope multiplier 最大 1.075 で 0.55 前後
+        //   - mainMixer outputVolume 0.5 を経由して 0.27 前後
+        //   - reverb wet (Task 17) で RMS は +20-30% 上昇する。peak は基本同等だが、
+        //     瞬間的に位相が揃って peak が +10-20% 程度上がる可能性は残る (CI 実測で確認)。
         // 16bit s16le 換算 (32767) でも余裕がある見込み。CI の WAV 検査でクリッピング無しを実測確認する。
+        //
+        // sub と reverb の相互作用:
+        //   - 低周波 (55Hz) は `.largeHall` で tail が長く聴こえやすい (人間の聴覚特性)
+        //   - 聴感で sub の reverb tail が膨らみすぎる場合、outputVolume を下げる（全体痩せる）
+        //     より sub の defaultAmplitude を 0.04 等に下げる方がバランス維持
+        //   - もしくは将来 sub だけ reverb send を弱める経路に分ける
         //
         // 倍音設定: 第 2 倍音 (× 2) を基音の 20%、第 3 倍音 (× 3) を 10%。
         // 偶数 + 奇数の自然な組み合わせで、ハーモニウム / オルガン系の温かみを出す。
+        // sub bass (A1=55Hz) の生成倍音は 110Hz/165Hz。root (220Hz=A3) は sub の「暗示される
+        // 第 4 倍音」位置にあたるが整数倍関係でうなりは生じず、110/165/220 の音響的接続が自然。
         let harmonics: [(Double, Float)] = [(2.0, 0.2), (3.0, 0.1)]
 
         // Envelope LFO（呼吸感）: 全 generator 共通の 37 秒周期 / ±7.5%。
@@ -253,11 +289,24 @@ final class AudioEngineController: ObservableObject {
         let envelopeDepth: Float = 0.075
         let envelopeInitialPhase: Double = 0.0
 
-        // initialDroneNotes[0]=root, [1]=5度, [2]=octave。各 frequency は Note が
-        // 平均律 (12 TET) で計算 (A3=220Hz, E4=329.63Hz, A4=440Hz)。
+        // initialDroneNotes[0]=sub (A1), [1]=root (A3), [2]=5度 (E4), [3]=octave (A4)。
+        // 各 frequency は Note が平均律 (12 TET) で計算 (55 / 220 / 329.63 / 440 Hz)。
+        //
+        // sub bass (Task 18) の LFO 設定:
+        //   - 周期 29.0s: 既存 13.7/17.3/23.1 と互いに約分しにくい値の組み合わせで揃わない
+        //   - depth 2.0cent: 重低音は LFO が「うねり」として聴こえやすいので控えめ
+        //   - initialPhase 3π/2: 既存 0 / π/2 / π と 4 等分位相で同位相タイミングを避ける
         self.droneGenerators = [
             DroneGenerator(
                 format: format, frequency: initialDroneNotes[0].frequency,
+                lfoPeriodSeconds: 29.0, lfoDepthCents: 2.0, lfoInitialPhase: .pi * 1.5,
+                harmonics: harmonics,
+                envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
+                envelopeInitialPhase: envelopeInitialPhase,
+                defaultAmplitude: 0.05
+            ),
+            DroneGenerator(
+                format: format, frequency: initialDroneNotes[1].frequency,
                 lfoPeriodSeconds: 17.3, lfoDepthCents: 2.5, lfoInitialPhase: 0.0,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -265,7 +314,7 @@ final class AudioEngineController: ObservableObject {
                 defaultAmplitude: 0.15
             ),
             DroneGenerator(
-                format: format, frequency: initialDroneNotes[1].frequency,
+                format: format, frequency: initialDroneNotes[2].frequency,
                 lfoPeriodSeconds: 23.1, lfoDepthCents: 2.0, lfoInitialPhase: .pi / 2,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -273,7 +322,7 @@ final class AudioEngineController: ObservableObject {
                 defaultAmplitude: 0.08
             ),
             DroneGenerator(
-                format: format, frequency: initialDroneNotes[2].frequency,
+                format: format, frequency: initialDroneNotes[3].frequency,
                 lfoPeriodSeconds: 13.7, lfoDepthCents: 1.5, lfoInitialPhase: .pi,
                 harmonics: harmonics,
                 envelopePeriodSeconds: envelopePeriod, envelopeDepth: envelopeDepth,
@@ -296,8 +345,10 @@ final class AudioEngineController: ObservableObject {
         // Task 17: ATMÓS 的な空間広がりのためのリバーブ。
         // `.largeHall` は中〜大ホール (RT60 数秒) の自然な減衰で、cathedral 系より響き
         // 過ぎず Drone の輪郭が残る。wetDryMix=40 は wet 40% / dry 60% の控えめバランス。
-        // 音量に対する影響: wet 成分はエネルギーを時間軸に分散するため peak はほぼ同等、
-        // RMS は最大で +20〜30% 程度上昇。既存の mainMixer.outputVolume = 0.5 で十分。
+        // 音量に対する影響: wet 成分はエネルギーを時間軸に分散するため peak は基本同等、
+        // RMS は最大で +20〜30% 程度上昇。瞬間的に位相が揃って peak が +10-20% 上がる
+        // 可能性は残るため、最終的には CI の WAV 検査で実測確認する。
+        // 既存の mainMixer.outputVolume = 0.5 で十分余裕がある見込み。
         let reverb = AVAudioUnitReverb()
         reverb.loadFactoryPreset(.largeHall)
         reverb.wetDryMix = 40.0
