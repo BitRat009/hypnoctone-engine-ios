@@ -8,9 +8,11 @@ import os
 /// `AVAudioSession` の設定を担う。実際のサンプル生成は `DroneGenerator` 4 声
 /// （sub bass + rootNote + 5度 + オクターブ、平均律 12 TET、L/R 微小 detune、各声に独立 LFO で
 ///  pitch vibrato、各声に第 2 / 第 3 倍音で楽器的温かみ）と
-/// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）に委譲し、
-/// `mainMixerNode` で並列ミックスする。全 generator に同じ envelope LFO（37 秒周期 / ±7.5%）を
-/// 適用して「全体が一緒に呼吸」する呼吸感を作る。
+/// `NoiseGenerator`（ピンクノイズ + 雨音風 lowpass + cutoff LFO、L/R 独立 PRNG/filter）と
+/// `GrainGenerator`（粒状音響: 短い windowed サイン波を疎にトリガ、L/R 独立、scale 内の高音域
+///  4 候補から sample-and-hold で pitch 選択）に委譲し、`mainMixerNode` で並列ミックスする。
+/// 全 generator に同じ envelope LFO（37 秒周期 / ±7.5%）を適用して「全体が一緒に呼吸」する
+/// 呼吸感を作る。
 /// 周波数は `Note` (MIDI 番号ベース) で扱い、UI に音名 (A3 / E4 / A4 等) を表示できる
 /// 基盤を持つ (Task 15)。デフォルト音域は A1 / A3 / E4 / A4 (55 / 220 / 329.63 / 440 Hz)、
 /// 倍音 ×2/×3 で更に上の帯域までカバー。
@@ -21,6 +23,9 @@ import os
 /// (factoryPreset = .largeHall, wetDryMix = 40)。音色や音域は変えず、空間だけ拡張する方針。
 /// Task 18 で sub bass (A1 = 55Hz, amp 0.05) を 4 声目として先頭に追加し、ATMÓS 的な重心の低い
 /// 空間を作る。sub の倍音 (110Hz / 165Hz) が root (220Hz) と自然に音響的に接続する。
+/// Task 19 で GrainGenerator (粒状音響) を追加。Drone/Noise の上に高音域 (C#5/E5/F#5/A5) の
+/// 短い「粒」を疎にトリガし、ATMÓS 的な「ぽつりぽつりと光る音」を重ねる。reverb tail と
+/// 組み合わせて「shimmer」感を作る。
 /// 出力フォーマットは 2ch stereo（Task 10 から）。
 /// 音声ファイル・録音素材・ループ素材は一切使わない。
 ///
@@ -45,8 +50,8 @@ import os
 /// `enableManualRenderingMode(.offline)` を使い、`start()` が
 /// 「fade-in → 定常 → fade-out + reverb tail」を含む WAV を Documents/sleep-mix.wav に書き出す。
 /// WAV には Drone 4 声（A1 55 / A3 220 / E4 329.63 / A4 440 Hz 固定、平均律、L/R 微小 detune）
-/// + Noise（ピンクノイズ、L/R 独立）が mixer でミックスされ、AVAudioUnitReverb (.largeHall)
-/// を通った 2ch stereo として記録される。
+/// + Noise（ピンクノイズ、L/R 独立）+ Grain（C#5/E5/F#5/A5 から sample-and-hold、L/R 独立 trigger）
+/// が mixer でミックスされ、AVAudioUnitReverb (.largeHall) を通った 2ch stereo として記録される。
 /// Codemagic 等の headless mac mini で AVAudioEngine がリアルタイム出力できない
 /// （Initialize: RPC timeout で SIGABRT する）対策。
 @MainActor
@@ -116,6 +121,11 @@ final class AudioEngineController: ObservableObject {
     /// Sleep モードで Drone に重ねるピンクノイズ生成器。
     /// `mainMixerNode` で Drone と並列にミックスされる。
     private let noiseGenerator: NoiseGenerator
+
+    /// Task 19: 粒状音響（granular synthesis）生成器。短い windowed サイン波を疎にトリガし、
+    /// Drone + Noise の上に高音域の shimmer を重ねる。`mainMixerNode` で並列ミックス。
+    /// reverb tail と組み合わせて ATMÓS 的な「ぽつりと光る音」を作る。
+    private let grainGenerator: GrainGenerator
 
     /// Task 17: mainMixer の後段に挟むリバーブ。ATMÓS 的な「広い空間に漂う」没入感を作る。
     /// factoryPreset = .largeHall (中〜大ホールの広がり、cathedral 系より自然な減衰)。
@@ -251,15 +261,20 @@ final class AudioEngineController: ObservableObject {
         // 13.7 / 17.3 / 23.1 / 29.0 秒で、互いに約分しにくい値の組み合わせのため
         // 聴感上の繰り返しが目立たない。
         //
-        // Headroom 評価（Task 18 で sub bass 追加後、概算）:
+        // Headroom 評価（Task 19 で grain 追加後、概算）:
         //   - sub (A1)  amp 0.05  ×  (基音 + 第2 + 第3) 1.3 = 0.065
         //   - root      amp 0.15  ×  1.3 = 0.195
         //   - 5度       amp 0.08  ×  1.3 = 0.104
         //   - octave    amp 0.05  ×  1.3 = 0.065
         //   - Drone 4 声合算 ≈ 0.429
         //   - Noise (Paul Kellet's + lowpass 統計信号) ≈ 0.08
-        //   - 合算 ≈ 0.51 → envelope multiplier 最大 1.075 で 0.55 前後
-        //   - mainMixer outputVolume 0.5 を経由して 0.27 前後
+        //   - Grain: 現在のパラメータ (期待 1 trig/s/ch, 次間隔 mean×0.5〜1.5 → 最低 0.5s, grain 60ms)
+        //     では同一 channel での grain 重なりは起きないため、ch あたり瞬間 peak は 1 個分の 0.04。
+        //     L/R 独立 trigger で稀に L/R が同時発火しても合計 peak は 0.04 を超えない（別 ch）。
+        //     つまり grain は mixer 入口で peak 0.04 / ch を一時的に追加するレイヤーで、
+        //     Drone + Noise の peak ≈ 0.51 に grain peak 0.04 を加えても 0.55 程度。
+        //   - 合算 peak ≈ 0.55 → envelope multiplier 最大 1.075 で 0.59 前後
+        //   - mainMixer outputVolume 0.5 を経由して 0.30 前後
         //   - reverb wet (Task 17) で RMS は +20-30% 上昇する。peak は基本同等だが、
         //     瞬間的に位相が揃って peak が +10-20% 程度上がる可能性は残る (CI 実測で確認)。
         // 16bit s16le 換算 (32767) でも余裕がある見込み。CI の WAV 検査でクリッピング無しを実測確認する。
@@ -337,6 +352,30 @@ final class AudioEngineController: ObservableObject {
             filterCutoffCenter: 2000.0,
             filterCutoffDepthHz: 400.0,
             filterLfoPeriodSeconds: 11.0,
+            envelopePeriodSeconds: envelopePeriod,
+            envelopeDepth: envelopeDepth,
+            envelopeInitialPhase: envelopeInitialPhase
+        )
+
+        // Task 19: 粒状音響レイヤー。Drone 4 声の上に scale 内の高音域 (C#5/E5/F#5/A5) で
+        // 短い grain (60ms) を疎にトリガする。L/R 独立、各 channel あたり 1 trigger/sec 期待。
+        // pitch 候補は A Major Pentatonic の 5/6 オクターブ目から: C#5/E5/F#5/A5
+        // (440Hz の root に対し 1〜2 オクターブ上、Drone と協和)。
+        // 同時 active 8 grain プールで余裕。grain 1 個 peak 0.04 / 同時 2-3 個重なって max 0.12。
+        // reverb の tail で「shimmer」が長く尾を引き、ATMÓS 的な空間感に貢献する。
+        let grainPitches: [Double] = [
+            Note(name: "C#5")?.frequency ?? 554.37,
+            Note(name: "E5")?.frequency ?? 659.26,
+            Note(name: "F#5")?.frequency ?? 739.99,
+            Note(name: "A5")?.frequency ?? 880.00,
+        ]
+        self.grainGenerator = GrainGenerator(
+            format: format,
+            defaultAmplitude: 0.04,
+            grainDurationSeconds: 0.06,
+            expectedTriggersPerSecond: 1.0,
+            pitchFrequencies: grainPitches,
+            maxActiveGrains: 8,
             envelopePeriodSeconds: envelopePeriod,
             envelopeDepth: envelopeDepth,
             envelopeInitialPhase: envelopeInitialPhase
@@ -425,9 +464,9 @@ final class AudioEngineController: ObservableObject {
                 return
             }
             // さらに二重チェック: 再 start で target が audible に戻っていれば finalize しない。
-            // 多声 Drone のいずれか、または Noise が audible なら fade-out 中ではない（再 start 後）。
+            // 多声 Drone のいずれか、Noise、または Grain が audible なら fade-out 中ではない。
             let anyDroneAudible = self.droneGenerators.contains(where: { $0.hasAudibleTarget })
-            if anyDroneAudible || self.noiseGenerator.hasAudibleTarget {
+            if anyDroneAudible || self.noiseGenerator.hasAudibleTarget || self.grainGenerator.hasAudibleTarget {
                 self.logger.info("fade-out 中に再 start を検知 (hasAudibleTarget)。engine.stop() をスキップ。")
                 return
             }
@@ -493,21 +532,23 @@ final class AudioEngineController: ObservableObject {
 
     // MARK: - フェードスケジュール
 
-    /// fade-in を全 Drone 声と Noise に依頼する。
+    /// fade-in を全 Drone 声と Noise と Grain に依頼する。
     /// 各 generator は独立した state を持つが、UX 上は「Sleep モード全体の fade-in」として揃える。
     private func scheduleFadeIn() {
         for drone in droneGenerators {
             drone.scheduleFadeIn(duration: fadeInSeconds)
         }
         noiseGenerator.scheduleFadeIn(duration: fadeInSeconds)
+        grainGenerator.scheduleFadeIn(duration: fadeInSeconds)
     }
 
-    /// fade-out を全 Drone 声と Noise に依頼する。
+    /// fade-out を全 Drone 声と Noise と Grain に依頼する。
     private func scheduleFadeOut() {
         for drone in droneGenerators {
             drone.scheduleFadeOut(duration: fadeOutSeconds)
         }
         noiseGenerator.scheduleFadeOut(duration: fadeOutSeconds)
+        grainGenerator.scheduleFadeOut(duration: fadeOutSeconds)
     }
 
     // MARK: - PitchScheduler (Task 16)
@@ -750,6 +791,10 @@ final class AudioEngineController: ObservableObject {
         }
         engine.attach(noiseGenerator.sourceNode)
         engine.connect(noiseGenerator.sourceNode, to: engine.mainMixerNode, format: format)
+
+        // Task 19: Grain generator も Drone/Noise と同列に mainMixer に並列接続。
+        engine.attach(grainGenerator.sourceNode)
+        engine.connect(grainGenerator.sourceNode, to: engine.mainMixerNode, format: format)
 
         // Task 17: mainMixer → reverb → outputNode に切り替える。
         // mainMixerNode へのアクセスで暗黙的に outputNode への接続が生成されているので、

@@ -1,5 +1,5 @@
 # Codemagic: iOS シミュレータでアプリを実際に起動し、画面と Sleep mix
-# （220Hz Drone + ピンクノイズ）の WAV をアーティファクトとして Web UI から確認できるようにする。
+# （Drone 4 声 + ピンクノイズ + Grain + reverb）の WAV をアーティファクトとして Web UI から確認できるようにする。
 #
 # 開発環境が Windows のため Xcode/シミュレータをローカルで動かせない。
 # GitHub Actions の iOS Build はコンパイル可否しか見ないので、ここでは
@@ -399,6 +399,107 @@ workflows:
             exit 1
           fi
           echo "OK: fade-out 後の reverb tail が L/R 両 ch で観測 + 末尾減衰も確認 (Task 17)。"
+
+      - name: "Verify GRAIN (Task 19: short windowed sine triggers in C#5/E5/F#5/A5 band group)"
+        script: |
+          set -euo pipefail
+          # Task 19: GrainGenerator は高音域 4 候補 (C#5=554 / E5=659 / F#5=740 / A5=880 Hz) から
+          # trigger 毎に uniform random で 1 つ選んで短い windowed サイン波を発火する。
+          # PRNG seed・候補順・初期 offset が少し変われば「特定の 1 候補が検査区間に出ない」可能性
+          # があるため、CI 検査は単一帯域ではなく **4 候補すべての帯域の集約** で判定する。
+          # 各候補帯の MAX absolute サンプル値を測り、参照帯 (1200Hz, Drone 倍音 989/1320 の中間で
+          # GRAIN 候補にも含まれない) の MAX と比較する。GRAIN が機能していれば
+          # 候補帯のうち少なくとも 1 つは参照帯より明確に大きく、また合算 MAX も参照帯を大きく上回る。
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "ERROR: ffmpeg が見つからない。Task 19 の GRAIN 検査に必須。"
+            exit 1
+          fi
+          WAV="$ARTIFACTS_DIR/sleep-mix.wav"
+          if [ ! -s "$WAV" ]; then
+            echo "ERROR: $WAV が見つからない。"
+            exit 1
+          fi
+
+          # 指定帯域 (bandpass) で steady 区間 (5.0〜14.0s) の MAX absolute s16le サンプルを測る。
+          measure_max_in_band() {
+            local center="$1"
+            local width="$2"
+            local channel="$3"  # "c0" (L) or "c1" (R)
+            ffmpeg -hide_banner -nostats -loglevel error \
+              -i "$WAV" \
+              -af "atrim=start=5.0:end=14.0,asetpts=PTS-STARTPTS,pan=mono|c0=${channel},bandpass=f=${center}:w=${width}" \
+              -f s16le -acodec pcm_s16le - 2>/dev/null \
+              | od -A n -t d2 -v \
+              | awk 'BEGIN { m=0 } { for (i=1;i<=NF;i++) { v=$i; if (v<0) v=-v; if (v>m) m=v } } END { print m+0 }'
+          }
+
+          # bandwidth 60Hz は grain 60ms の主ローブ (約 17Hz) + LFO ぶれを通す広さ。
+          # E5=659Hz と A5=880Hz は Drone 倍音 (660Hz=220×3 / 880Hz=440×2) と重なるので、
+          # GRAIN 単独の指標としては C#5/F#5 のほうが clean。ただし「候補帯群の集約」での判定なので
+          # 全候補を測る。
+          C5_L=$(measure_max_in_band 554 60 c0)
+          C5_R=$(measure_max_in_band 554 60 c1)
+          E5_L=$(measure_max_in_band 659 60 c0)
+          E5_R=$(measure_max_in_band 659 60 c1)
+          F5_L=$(measure_max_in_band 740 60 c0)
+          F5_R=$(measure_max_in_band 740 60 c1)
+          A5_L=$(measure_max_in_band 880 60 c0)
+          A5_R=$(measure_max_in_band 880 60 c1)
+          REF_L=$(measure_max_in_band 1200 60 c0)
+          REF_R=$(measure_max_in_band 1200 60 c1)
+
+          # L/R それぞれで「候補 4 帯の MAX」と「Drone 倍音と被らない 2 帯 (C#5/F#5) の各最大」を出す。
+          # max-of-4 は「どの候補が選ばれても拾える」性質を測る。
+          # CLEAN_MAX (C#5/F#5 の max) は参照帯と「1 帯 vs 1 帯」で比較するため、
+          # 単純な和の比較で生じる「無信号でも 2 帯合計 / 1 帯参照は期待値として >1 になりやすい」
+          # 罠を回避する (Codex 再レビュー指摘)。
+          MAX_OF4_L=$(awk -v a="$C5_L" -v b="$E5_L" -v c="$F5_L" -v d="$A5_L" \
+            'BEGIN { m=a; if (b+0>m) m=b; if (c+0>m) m=c; if (d+0>m) m=d; print m+0 }')
+          MAX_OF4_R=$(awk -v a="$C5_R" -v b="$E5_R" -v c="$F5_R" -v d="$A5_R" \
+            'BEGIN { m=a; if (b+0>m) m=b; if (c+0>m) m=c; if (d+0>m) m=d; print m+0 }')
+          CLEAN_MAX_L=$(awk -v a="$C5_L" -v b="$F5_L" 'BEGIN { m=a; if (b+0>m) m=b; print m+0 }')
+          CLEAN_MAX_R=$(awk -v a="$C5_R" -v b="$F5_R" 'BEGIN { m=a; if (b+0>m) m=b; print m+0 }')
+          echo "grain bands L (C#5/E5/F#5/A5): $C5_L $E5_L $F5_L $A5_L  | max-of-4=$MAX_OF4_L clean-max(C#5/F#5)=$CLEAN_MAX_L"
+          echo "grain bands R (C#5/E5/F#5/A5): $C5_R $E5_R $F5_R $A5_R  | max-of-4=$MAX_OF4_R clean-max(C#5/F#5)=$CLEAN_MAX_R"
+          echo "ref band 1200Hz: L=$REF_L R=$REF_R"
+
+          FAIL=0
+          # GRAIN trigger は L/R 独立かつ平均 1/sec/ch なので、9 秒の steady 区間内で
+          # L/R それぞれ最低数発は発火している想定。候補 4 帯のうち最大のものが
+          # 200 (s16 で 0.006、定常 noise + drone harmonics 漏れ超過水準) を超えていれば
+          # 「どの pitch が選ばれても 1 個は出ている」確証になる。
+          if [ "${MAX_OF4_L:-0}" -lt 200 ]; then
+            echo "ERROR: L 候補帯 (C#5/E5/F#5/A5) 中の最大 MAX が低すぎる (実際 $MAX_OF4_L, 期待 >= 200)。GRAIN trigger が L 側で観測できていない可能性。"
+            FAIL=1
+          fi
+          if [ "${MAX_OF4_R:-0}" -lt 200 ]; then
+            echo "ERROR: R 候補帯 (C#5/E5/F#5/A5) 中の最大 MAX が低すぎる (実際 $MAX_OF4_R, 期待 >= 200)。GRAIN trigger が R 側で観測できていない可能性。"
+            FAIL=1
+          fi
+          # C#5 または F#5 (Drone 倍音と被らない 2 帯のうちのいずれか) の MAX が
+          # 1200Hz 参照帯 MAX より明確に大きい (1.5x 以上) ことを要求。
+          # 「帯域数 1 vs 1」の比較なので、無信号での偽陽性が発生しない。
+          # L/R 両 ch で同条件を満たすことでステレオ独立 trigger の検査も兼ねる。
+          GRAIN_VS_REF_L=$(awk -v g="$CLEAN_MAX_L" -v r="$REF_L" \
+            'BEGIN { print (r+0 > 0 && g/r >= 1.5) ? 1 : 0 }')
+          if [ "$GRAIN_VS_REF_L" != "1" ]; then
+            RATIO=$(awk -v g="$CLEAN_MAX_L" -v r="$REF_L" \
+              'BEGIN { if (r+0 > 0) printf "%.2f", g/r; else print "n/a" }')
+            echo "ERROR: L チャネル max(C#5, F#5) / 1200Hz 参照帯比が小さすぎる (実際 $RATIO, 期待 >= 1.5)。GRAIN が選択的に clean 帯に出ている証拠が不足。"
+            FAIL=1
+          fi
+          GRAIN_VS_REF_R=$(awk -v g="$CLEAN_MAX_R" -v r="$REF_R" \
+            'BEGIN { print (r+0 > 0 && g/r >= 1.5) ? 1 : 0 }')
+          if [ "$GRAIN_VS_REF_R" != "1" ]; then
+            RATIO=$(awk -v g="$CLEAN_MAX_R" -v r="$REF_R" \
+              'BEGIN { if (r+0 > 0) printf "%.2f", g/r; else print "n/a" }')
+            echo "ERROR: R チャネル max(C#5, F#5) / 1200Hz 参照帯比が小さすぎる (実際 $RATIO, 期待 >= 1.5)。GRAIN が選択的に clean 帯に出ている証拠が不足。"
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            exit 1
+          fi
+          echo "OK: 候補 4 帯 (C#5/E5/F#5/A5) で GRAIN trigger が L/R 両 ch で観測 + max(C#5, F#5) が参照帯比 1.5x 以上 (Task 19)。"
 
       - name: Shutdown simulator
         script: |
