@@ -779,8 +779,47 @@ Task 21 で audio 層インフラ完成 → UI から Mode を切り替える。
       - Medium 反映: timerPresetButton コメントを「32pt 妥協、理由付き、改善候補」に書き直し
       - Low は据え置き (実機テスト後の改善候補)
       - 2 回目: 全反映、最終 OK
-- [ ] Phase 4: push → CI → artifacts_028 で UI 確認
-      - WAV: artifacts_027 と数値同値想定 (Sleep Timer は default Off、CI 影響なし)
-      - screenshot: Stop 状態で "Timer" + Off (ハイライト) + 15m/30m/45m/60m/90m が並ぶ
-      - Playing 状態の screenshot は Timer ボタン群が消えて "Sleep Timer · mm:ss" が出る想定
-        (CI default は Off なので残り時間表示なし、Timer 行が空になる可能性)
+- [x] Phase 4: push → CI → artifacts_028 で UI 確認 (完全成功)
+      - WAV: artifacts_027 と bit-perfect 同値 ✓
+      - screenshot: "Timer" + Off (ハイライト) + 15m/30m/45m/60m/90m が並ぶ ✓
+      - Playing 状態でも Timer 行は表示 (default Off なのでカウントダウン表示なし) ✓
+
+## Task 24 — Background playback + Lock screen 統合
+
+Apple Developer Program 加入前の機能仕上げ。Sleep アプリとして必須の「画面ロック中も
+継続再生 + Lock screen / Control Center から再生制御」を実装。実機テストは加入後だが
+CI でビルド成功 + audio path 無変更 + Info.plist 確認まで実施。
+
+### 設計
+
+- **UIBackgroundModes = audio** で OS に「Background での音声出力を継続する」と宣言
+- **AVAudioSession .playback カテゴリ** (Task 3 から既存) で Background playback 公式サポート
+- **MPNowPlayingInfoCenter**: title "Hypnoctone" + artist (現在モード名) + playbackRate
+- **MPRemoteCommandCenter**: play/pause/stop/togglePlayPause を Lock screen から
+- **Actions.{start, stop, toggle} は @MainActor closure** で、handler 内で `Task { @MainActor in }` hop
+- **AudioViewModel が NowPlayingService を所有**、init で remote command setup + 初期 publish
+- **start/stop/setMode で updateNowPlaying** を呼んでモード追従
+
+### Phase
+
+- [x] Phase 1: pbxproj に INFOPLIST_KEY_UIBackgroundModes = audio を追加
+      - Debug/Release 両 build settings、Xcode 16 auto plist で配列化される想定
+- [x] Phase 2: NowPlayingService 新規ファイル
+      - @MainActor final class、Actions struct、setupRemoteCommands / updateNowPlaying
+      - addTarget の戻り値を registeredTargets で保持、deinit で removeTarget
+- [x] Phase 3: AudioViewModel に統合
+      - nowPlayingService プロパティ、init で remote command + 初期 publish
+      - start/stop/setMode で updateNowPlaying を呼ぶ
+      - Actions.{start, stop, toggle} に [weak self] で ViewModel メソッド渡し
+- [x] Phase 4: Codex クロスレビュー
+      - 1 回目: Critical なし、High 1 (actor 境界) + Medium 3 (toggle未実装 / deinit / 初期publish)
+      - High 反映: Actions closure に @MainActor 注釈 + Task { @MainActor in } で hop
+      - Medium 1 反映: togglePlayPauseCommand を実装、Actions.toggle 追加、ViewModel.toggle() 接続
+      - Medium 2 (deinit Swift 6 strict) 据え置き: SWIFT_VERSION = 5.0 で警告なし、app lifetime singleton
+      - Medium 3 (初期 publish) 据え置き: 実機 UX 確認後に判断
+      - 2 回目: 最終 OK、Critical/High なし、Medium 残課題は将来の技術負債明示
+- [ ] Phase 5: push → CI → artifacts_029 で副作用なし確認
+      - WAV: artifacts_028 と数値同値想定 (NowPlayingService は audio path に触らない)
+      - codemagic.yaml に plutil -p で生成 Info.plist の UIBackgroundModes 確認 step 追加
+      - build success + crash 無し + Info.plist に "audio" 配列要素確認
+      - 実機での Background playback / Lock screen 操作確認は Developer Program 加入後

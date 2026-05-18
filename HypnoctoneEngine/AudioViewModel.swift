@@ -83,6 +83,11 @@ final class AudioViewModel: ObservableObject {
 
     private let controller: AudioEngineController
 
+    /// Lock screen / Control Center 統合 (Task 24)。
+    /// `start()` / `stop()` で playback state を NowPlaying に publish し、
+    /// Lock screen からの play/pause/stop コマンドで自分の `start()` / `stop()` を呼ばせる。
+    private let nowPlayingService = NowPlayingService()
+
     /// `controller.objectWillChange` を `self.objectWillChange` に forward するための保持。
     private var cancellables: Set<AnyCancellable> = []
 
@@ -106,6 +111,21 @@ final class AudioViewModel: ObservableObject {
                 self?.objectWillChange.send()
             }
             .store(in: &cancellables)
+
+        // Task 24: Lock screen の play/pause/stop/toggle コマンドを self の start/stop に紐付け。
+        // closure は [weak self] でキャプチャして retain cycle を防ぐ。
+        // Actions の closure 型は @MainActor 注釈付き (NowPlayingService 側で MediaPlayer の
+        // 任意スレッド呼出から MainActor に hop してから呼ぶ設計、Codex Task 24 High 指摘反映)。
+        nowPlayingService.setupRemoteCommands(
+            actions: NowPlayingService.Actions(
+                start: { [weak self] in self?.start() },
+                stop: { [weak self] in self?.stop() },
+                toggle: { [weak self] in self?.toggle() }
+            )
+        )
+        // 初期状態 (Stopped) の Now Playing 情報も publish しておく。
+        // これで「アプリ初回起動時に Lock screen をすぐ開いても情報が出る」状態に。
+        nowPlayingService.updateNowPlaying(isPlaying: false, modeLabel: currentModeLabel)
     }
 
     /// 再生 / 停止をトグルする。
@@ -119,6 +139,7 @@ final class AudioViewModel: ObservableObject {
     /// まま維持し、UI と engine の整合性を保つ（Codex Task 5 レビュー指摘 5 への対応）。
     ///
     /// Task 23: Sleep Timer が設定されていればカウントダウン Task を起動する。
+    /// Task 24: Lock screen の Now Playing 情報を「再生中」に更新。
     func start() {
         if controller.start() {
             isPlaying = true
@@ -126,6 +147,8 @@ final class AudioViewModel: ObservableObject {
             if let mins = sleepTimerMinutes {
                 startSleepTimerCountdown(totalSeconds: mins * 60)
             }
+            // Lock screen / Control Center に「再生中」を publish。
+            nowPlayingService.updateNowPlaying(isPlaying: true, modeLabel: currentModeLabel)
         }
     }
 
@@ -133,10 +156,13 @@ final class AudioViewModel: ObservableObject {
     ///
     /// Task 23: Sleep Timer のカウントダウン Task も同時に cancel。
     /// `sleepTimerMinutes` の設定値自体は保持する (= 次の Start で同じタイマーで再開)。
+    /// Task 24: Lock screen の Now Playing 情報を「停止中」に更新。
     func stop() {
         controller.stop()
         isPlaying = false
         cancelSleepTimerTask()
+        // Lock screen / Control Center に「停止中」を publish (playbackRate=0 で pause アイコンに切替)。
+        nowPlayingService.updateNowPlaying(isPlaying: false, modeLabel: currentModeLabel)
     }
 
     /// 指定 voice グループの mute / unmute をトグルする（Task 20）。
@@ -184,9 +210,12 @@ final class AudioViewModel: ObservableObject {
     /// `isPlaying` 中 (engine 動作中) は controller 側で ignore される。
     /// 成功時のみ objectWillChange を発火 (controller の @Published currentMode 経由でも
     /// 通知は走るが、即時反映を保証するため明示送信)。
+    /// Task 24: Lock screen の artist 表記もモード名に追従させる。
     func setMode(_ mode: Mode) {
         if controller.setMode(mode) {
             objectWillChange.send()
+            // モード切替は Stop 状態のみ可能 (Task 21 設計) なので isPlaying=false で publish。
+            nowPlayingService.updateNowPlaying(isPlaying: false, modeLabel: currentModeLabel)
         }
     }
 

@@ -89,6 +89,18 @@ workflows:
           echo "Installing: $APP_PATH"
           xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
 
+          # Task 24: 生成された Info.plist の確認。UIBackgroundModes 配列に "audio" が
+          # 入っていることを目視確認できるようにログ出力する。
+          # Xcode 16 の auto plist 生成で INFOPLIST_KEY_UIBackgroundModes = audio が
+          # 配列化されているはず。
+          INFO_PLIST="$APP_PATH/Info.plist"
+          if [ -f "$INFO_PLIST" ]; then
+            echo "--- Generated Info.plist (UIBackgroundModes 等を確認) ---"
+            plutil -p "$INFO_PLIST" | grep -A 3 -E "UIBackgroundModes|CFBundleIdentifier" || true
+          else
+            echo "WARNING: Info.plist が見つかりません: $INFO_PLIST"
+          fi
+
       - name: Capture video + screenshots + WAV (v3 offline render)
         script: |
           set -euo pipefail
