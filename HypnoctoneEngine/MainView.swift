@@ -13,19 +13,20 @@ struct MainView: View {
             Theme.backgroundGradient
                 .ignoresSafeArea()
 
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 header
                 Spacer(minLength: 4)
                 PulseView(isActive: viewModel.isPlaying)
                 Spacer(minLength: 4)
                 statusText
+                modeSelector
                 musicInfo
                 transportButton
                 volumeControl
                 timerLabel
             }
             .padding(.horizontal, 24)
-            .padding(.vertical, 48)
+            .padding(.vertical, 40)
         }
         .preferredColorScheme(.dark)
         .onAppear(perform: handleCIAutostart)
@@ -46,13 +47,14 @@ struct MainView: View {
 
     // MARK: - 構成要素
 
-    /// アプリ名とモード表示。
+    /// アプリ名と現在モード名。Task 22 で subtitle を `viewModel.currentModeLabel` 動的化
+    /// ("Sleep Mode" / "Focus Mode" / "Meditate Mode" / "Relax Mode")。
     private var header: some View {
         VStack(spacing: 6) {
             Text("Hypnoctone")
                 .font(.system(size: 30, weight: .light, design: .rounded))
                 .foregroundColor(Theme.primaryText)
-            Text("Sleep Mode")
+            Text(viewModel.currentModeLabel)
                 .font(.system(size: 14, weight: .regular, design: .rounded))
                 .tracking(2)
                 .foregroundColor(Theme.secondaryText)
@@ -64,6 +66,78 @@ struct MainView: View {
         Text(viewModel.statusText)
             .font(.system(size: 15, weight: .regular, design: .rounded))
             .foregroundColor(Theme.secondaryText)
+    }
+
+    /// 4 モード切替セレクタ (Task 22, ATMÓS 風 SLEEP/FOCUS/MEDITATE/RELAX)。
+    /// - 現在モードは Theme.accent でハイライト、他モードはサブテキスト色
+    /// - canChangeMode = false (再生中・fade-out 中) なら全ボタン無効化 + 補足メッセージ
+    /// - BPM 表示 (preset.bpm) を右側に小さく
+    /// - 切替は Stop 状態のみ可能 (audio 層の Task 21 setMode が isRunning ガード)
+    private var modeSelector: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                ForEach(viewModel.allModes) { mode in
+                    modeButton(mode: mode)
+                }
+            }
+            // canChangeMode が false (= 再生中 / fade-out 中) のときは補足メッセージで誘導する。
+            // 一方 BPM 表示は常時出して「このモードのリズム感」を視覚化する。
+            HStack {
+                if !viewModel.canChangeMode {
+                    Text("Stop playback to change mode")
+                        .font(.system(size: 10, weight: .regular, design: .rounded))
+                        .foregroundColor(Theme.secondaryText)
+                        .opacity(0.7)
+                }
+                Spacer()
+                Text("BPM \(viewModel.bpm)")
+                    .font(.system(size: 10, weight: .regular, design: .rounded))
+                    .tracking(1)
+                    .foregroundColor(Theme.secondaryText)
+            }
+            .padding(.horizontal, 2)
+        }
+    }
+
+    /// 1 モード分のボタン。現在モードはハイライト、他モードはサブ色。
+    /// canChangeMode が false なら全ボタン半透明 + tap 無効。
+    ///
+    /// Tap target: Apple HIG の 44pt 最小推奨を満たすため `.frame(minHeight: 44)`。
+    /// MEDITATE (8 文字) が iPhone SE 幅で詰まらないよう `minimumScaleFactor(0.7)` で
+    /// 縮小も許容 (Codex Task 22 High/Low 指摘反映)。
+    /// アクセシビリティ: 現在モードに `.accessibilityValue("Current mode")`、
+    /// disabled に `.accessibilityHint("Stop playback to change mode")` で VoiceOver 補足。
+    private func modeButton(mode: Mode) -> some View {
+        let isCurrent = (viewModel.currentMode == mode)
+        let canChange = viewModel.canChangeMode
+
+        return Button {
+            viewModel.setMode(mode)
+        } label: {
+            Text(mode.label)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .tracking(1)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundColor(isCurrent ? Theme.primaryText : Theme.secondaryText)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Theme.accent.opacity(isCurrent ? 0.35 : 0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Theme.accent.opacity(isCurrent ? 0.6 : 0.20), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!canChange)
+        // canChangeMode false のとき全体を薄く (disabled モード示唆)。現在モードボタンも一緒に薄くなる
+        // のは「触れない状態」を一貫表現するため。
+        .opacity(canChange ? 1.0 : 0.5)
+        .accessibilityLabel(mode.label)
+        .accessibilityValue(isCurrent ? "Current mode" : "")
+        .accessibilityHint(canChange ? "" : "Stop playback to change mode")
     }
 
     /// 音楽理論ベースの情報表示（Task 15 で追加、Task 20 で 4 voice グループ + MUTE に再構築）。

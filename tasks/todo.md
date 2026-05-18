@@ -703,7 +703,46 @@ ATMÓS の 4 モード切替を audio パラメータプリセットとして実
       - Medium 1 反映: setTriggerRate で framesUntilNextTrigger を新 mean ベースに再初期化
       - Medium 2 反映: applyPreset 冒頭に precondition(droneGenerators.count == 4)
       - 2 回目: 全指摘解消、最終 OK
-- [ ] Phase 5: push → CI → artifacts_026 で SLEEP 互換性確認
-      - 既存テストは SLEEP モードで実行 (default) → WAV 数値が artifacts_025 と完全同値であることを確認
-      - = Task 21 の audio 層変更が副作用を出していない実証
-      - mode 切替は CI では発火しない (UI 操作系のため Task 22 で発火確認)
+- [x] Phase 5: push → CI → artifacts_026 で SLEEP 互換性確認 (完全成功)
+      - 初回 ビルド失敗 → AudioEngineController.Mode (内部) vs global Mode (Task 21 新規) の名前衝突
+        → 内部を EngineMode にリネームで解消 (commit 747758f)
+      - 2 回目 ビルド成功 + WAV 数値が artifacts_025 と bit-perfect 同値 ✓
+      - L_MAX=4297/R_MAX=4535/DIFF_MAX=3416、GRAIN 全帯域同値
+      - = Task 21 の audio 層変更が SLEEP モード (default) に副作用を出していない完全実証
+
+## Task 22 — 4 モード切替 UI (ATMÓS 風 SLEEP/FOCUS/MEDITATE/RELAX ボタン)
+
+Task 21 で audio 層インフラ完成 → UI から Mode を切り替える。ATMÓS スクショ風の 4 ボタン
+横並び + BPM 表示 + canChangeMode が false (再生中) のときの補足メッセージ。
+
+### 設計
+
+- header subtitle を "Sleep Mode" 静的 → `viewModel.currentModeLabel` (Sleep/Focus/...) 動的化
+- modeSelector を statusText と musicInfo の間に配置 (header → status → mode → voice → transport の流れ)
+- 4 ボタン HStack: 現在モードは Theme.accent ハイライト、他はサブ色
+- canChangeMode = false (再生中・fade-out 中) は全 button disabled + 半透明 + "Stop playback to change mode"
+- BPM 表示 (= preset.bpm) は modeSelector 内の右寄せ
+- Apple HIG 44pt 最小 tap target / VoiceOver 対応 / Dynamic Type 弱対応 (minimumScaleFactor)
+
+### Phase
+
+- [x] Phase 1: AudioViewModel に header subtitle + allModes API
+      - `currentModeLabel: String` (Sleep/Focus/Meditate/Relax Mode)
+      - `allModes: [Mode] = Mode.allCases`
+- [x] Phase 2: MainView に modeSelector セクション追加
+      - VStack: header → status → modeSelector → musicInfo → transport の順
+      - 4 ボタン横並び + 補足メッセージ + BPM 表示
+- [x] Phase 3: header subtitle を動的に
+      - "Sleep Mode" → viewModel.currentModeLabel
+- [x] Phase 4: Codex クロスレビュー
+      - 1 回目: Critical なし、High 1 (tap target 44pt 未満) + Medium 1 (アクセシビリティ) + Low 2
+      - High 反映: button label に .frame(maxWidth: .infinity, minHeight: 44)
+      - Medium 反映: .accessibilityLabel / .accessibilityValue / .accessibilityHint 追加
+      - Low 1 反映 (MEDITATE 詰まり): .lineLimit(1) + .minimumScaleFactor(0.7)
+      - Low 2 (BPM 浮き): 据え置き (将来 Scale/BPM/Density 行統合で対応)
+      - 2 回目: 全反映、最終 OK
+- [ ] Phase 5: push → CI → artifacts_027 で 4 モード UI 確認
+      - WAV: artifacts_026 と数値同値 (SLEEP デフォルトモード、音声出力は変えていない)
+      - screenshot: SLEEP がハイライト、他 3 モードがサブ色、BPM 30 表示
+      - Playing 状態の screenshot で disabled 表示 + "Stop playback to change mode" メッセージ
+      - 実機テスト準備としての UI 整備が完了 → 次は実機転送 (Task 23?)

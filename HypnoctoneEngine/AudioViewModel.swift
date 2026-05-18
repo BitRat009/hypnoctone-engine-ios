@@ -127,8 +127,23 @@ final class AudioViewModel: ObservableObject {
     /// objectWillChange を forward しているので UI に自動反映される。
     var currentMode: Mode { controller.currentMode }
 
+    /// header subtitle 用のモード表記 ("Sleep Mode" / "Focus Mode" / "Meditate Mode" / "Relax Mode")。
+    /// Modes.swift の `label` は ATMÓS 風の大文字 ("SLEEP") なので、header 用の Capitalized 表記は
+    /// ここで生成する (UI 一貫性: header は タイトルケース、ボタンは大文字)。
+    var currentModeLabel: String {
+        switch controller.currentMode {
+        case .sleep:    return "Sleep Mode"
+        case .focus:    return "Focus Mode"
+        case .meditate: return "Meditate Mode"
+        case .relax:    return "Relax Mode"
+        }
+    }
+
     /// UI 表示用 BPM (ATMÓS の "BPM 30" 表記再現)。
     var bpm: Int { controller.currentMode.preset.bpm }
+
+    /// UI に表示する全モード一覧 (ボタングリッド用)。`Mode.allCases` を直接公開する。
+    var allModes: [Mode] { Mode.allCases }
 
     /// 現在のモードで Mode 切替可能か (Stop 状態でのみ可能、Task 21 設計)。
     /// UI でモードボタンを enable/disable する判定に使う。
