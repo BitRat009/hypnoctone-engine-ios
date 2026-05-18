@@ -741,8 +741,46 @@ Task 21 で audio 層インフラ完成 → UI から Mode を切り替える。
       - Low 1 反映 (MEDITATE 詰まり): .lineLimit(1) + .minimumScaleFactor(0.7)
       - Low 2 (BPM 浮き): 据え置き (将来 Scale/BPM/Density 行統合で対応)
       - 2 回目: 全反映、最終 OK
-- [ ] Phase 5: push → CI → artifacts_027 で 4 モード UI 確認
-      - WAV: artifacts_026 と数値同値 (SLEEP デフォルトモード、音声出力は変えていない)
-      - screenshot: SLEEP がハイライト、他 3 モードがサブ色、BPM 30 表示
-      - Playing 状態の screenshot で disabled 表示 + "Stop playback to change mode" メッセージ
-      - 実機テスト準備としての UI 整備が完了 → 次は実機転送 (Task 23?)
+- [x] Phase 5: push → CI → artifacts_027 で 4 モード UI 確認 (完全成功)
+      - WAV 数値 artifacts_026 と bit-perfect 同値 ✓ (audio path 無変更を実証)
+      - screenshot: Stopped 状態で SLEEP ハイライト + 他 3 モードサブ色 + "BPM 30" 表示 ✓
+      - Playing 状態で全モードボタン半透明 (disabled) + "Stop playback to change mode" ✓
+
+## Task 23 — Sleep Timer 機能
+
+実機テスト前の最後の機能追加。タイマー時間プリセットを選び、再生開始から自動的に
+カウントダウン、0 到達で fade-out → engine 停止。Sleep アプリの定番機能。
+
+### 設計
+
+- プリセット: **Off / 15 / 30 / 45 / 60 / 90 分** (Sleep アプリの定番値)
+- カウントダウン Task は `Task.sleep(1s)` のループ、`@Published` で UI 1Hz 更新
+- 手動 Stop で Task cancel、設定値は保持 (= 次の Start で再開)
+- 時間切れで `stop()` 自動呼出 (fade-out → engine.stop())
+- CI offline モードは default nil (Off) なので影響なし: renderOffline 同期完了で Task 起動なし
+- self 強保持 (90 分中の生存) は root @StateObject 前提で許容、将来改善候補
+
+### Phase
+
+- [x] Phase 1: AudioViewModel に Sleep Timer state + API
+      - @Published sleepTimerMinutes + sleepTimerRemainingSeconds
+      - setSleepTimer(minutes:) で設定変更 (重複防御 + 再生中なら即 Task 起動)
+      - startSleepTimerCountdown / cancelSleepTimerTask の private 実装
+      - start() / stop() のライフサイクルに Task 起動/cancel を統合
+      - sleepTimerRemainingText で "mm:ss" 表示
+- [x] Phase 2: MainView の timerLabel を実装に置き換え
+      - 再生中: "Sleep Timer · 14:32" 残り時間表示
+      - Stop 状態: "Timer" + Off/15/30/45/60/90 プリセットボタン横並び
+      - 現在選択値はアクセント色ハイライト
+      - VoiceOver: accessibilityLabel + accessibilityValue
+      - minHeight 32 (HIG 44 より小、画面下端の妥協、コメント明記)
+- [x] Phase 3: Codex クロスレビュー
+      - 1 回目: Critical/High なし、Medium 1 (コメント不一致) + Low 2 (self 強保持 / 1秒精度)
+      - Medium 反映: timerPresetButton コメントを「32pt 妥協、理由付き、改善候補」に書き直し
+      - Low は据え置き (実機テスト後の改善候補)
+      - 2 回目: 全反映、最終 OK
+- [ ] Phase 4: push → CI → artifacts_028 で UI 確認
+      - WAV: artifacts_027 と数値同値想定 (Sleep Timer は default Off、CI 影響なし)
+      - screenshot: Stop 状態で "Timer" + Off (ハイライト) + 15m/30m/45m/60m/90m が並ぶ
+      - Playing 状態の screenshot は Timer ボタン群が消えて "Sleep Timer · mm:ss" が出る想定
+        (CI default は Off なので残り時間表示なし、Timer 行が空になる可能性)

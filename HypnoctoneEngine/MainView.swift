@@ -238,11 +238,82 @@ struct MainView: View {
         }
     }
 
-    /// Timer の仮表示（この段階では機能は未実装）。
+    /// Sleep Timer 行 (Task 23, ATMÓS の "SLEEP TIMER" を機能化)。
+    /// - Stop 状態 (`sleepTimerRemainingSeconds == nil`): Off/15/30/45/60/90 分のプリセットボタン
+    /// - 再生中 (カウントダウン進行中): "Sleep Timer · mm:ss" の残り時間表示
+    /// タイマー設定値 (`sleepTimerMinutes`) はハイライト、他はサブ色。
+    /// 時間切れで自動的に stop() が走る (= fade-out → engine.stop()、ViewModel 側で実装)。
     private var timerLabel: some View {
-        Text("Timer: Off")
-            .font(.system(size: 13, weight: .regular, design: .rounded))
-            .foregroundColor(Theme.secondaryText)
+        VStack(spacing: 6) {
+            if viewModel.sleepTimerRemainingSeconds != nil {
+                // 再生中 (カウントダウン中): 残り時間表示
+                timerCountdownView
+            } else {
+                // Stop 状態: プリセット選択ボタン
+                timerPresetButtons
+            }
+        }
+    }
+
+    /// 再生中のカウントダウン表示。
+    /// "Sleep Timer · 14:32" 形式。タイマー Off のときは「カウントダウンなし」なので
+    /// この view は呼ばれない (timerLabel が presetButtons 側を表示)。
+    private var timerCountdownView: some View {
+        Text("Sleep Timer · \(viewModel.sleepTimerRemainingText)")
+            .font(.system(size: 12, weight: .regular, design: .rounded))
+            .tracking(1)
+            .foregroundColor(Theme.primaryText)
+            .accessibilityLabel("Sleep Timer remaining \(viewModel.sleepTimerRemainingText)")
+    }
+
+    /// Off/15/30/45/60/90 分のプリセットボタン横並び。
+    /// 現在の選択値はアクセント色、他はサブ色。再生中は表示されない (countdownView が代替)。
+    private var timerPresetButtons: some View {
+        HStack(spacing: 6) {
+            Text("Timer")
+                .font(.system(size: 10, weight: .regular, design: .rounded))
+                .tracking(1)
+                .foregroundColor(Theme.secondaryText)
+            ForEach(viewModel.sleepTimerPresetMinutes, id: \.self) { mins in
+                timerPresetButton(minutes: mins)
+            }
+        }
+    }
+
+    /// 1 プリセット分のボタン。`minutes == nil` は "OFF"、それ以外は "15m" / "30m" 等。
+    /// 現在選択中の値は Theme.accent でハイライト。
+    ///
+    /// Tap target: `minHeight: 32` は Apple HIG 推奨 44pt より小さい妥協。理由は画面下端で
+    /// 横並び 6 ボタン + "Timer" ラベルの幅制約 (iPhone SE 約 320pt - padding) で 44pt を
+    /// 揃えると幅も縦も詰まる。Sleep Timer 選択は起動時に 1 度だけの操作なので、頻繁な
+    /// 誤タップは想定しにくく許容範囲とした。実機聴感調整後に Menu/Picker 化や 2 行 grid 化を
+    /// 検討する余地あり (Codex Task 23 Medium 指摘: 将来改善候補)。
+    private func timerPresetButton(minutes: Int?) -> some View {
+        let isCurrent = (viewModel.sleepTimerMinutes == minutes)
+        let label: String = minutes.map { "\($0)m" } ?? "Off"
+
+        return Button {
+            viewModel.setSleepTimer(minutes: minutes)
+        } label: {
+            Text(label)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .tracking(0.5)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundColor(isCurrent ? Theme.primaryText : Theme.secondaryText)
+                .frame(maxWidth: .infinity, minHeight: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Theme.accent.opacity(isCurrent ? 0.35 : 0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Theme.accent.opacity(isCurrent ? 0.6 : 0.15), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(minutes.map { "\($0) minute timer" } ?? "Timer off")
+        .accessibilityValue(isCurrent ? "Selected" : "")
     }
 }
 

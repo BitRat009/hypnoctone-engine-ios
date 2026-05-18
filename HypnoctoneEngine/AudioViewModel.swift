@@ -63,6 +63,24 @@ final class AudioViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Sleep Timer 状態 (Task 23)
+
+    /// ユーザーが選択したスリープタイマーの時間 (分)。`nil` ならタイマー無効 (Off)。
+    /// Stop 状態でも保持される (再生開始時に自動的にカウントダウンを始めるため)。
+    /// 手動 Stop で Off に戻す設計にはしていない (= 設定は永続、UX として「次の再生にも適用」)。
+    @Published private(set) var sleepTimerMinutes: Int? = nil
+
+    /// 再生中のカウントダウン残り秒数。再生していない時や Off の時は `nil`。
+    /// UI は `nil` 判定で「タイマー時間選択 vs 残り時間表示」を切り替える。
+    @Published private(set) var sleepTimerRemainingSeconds: Int? = nil
+
+    /// 1 秒ごとに `sleepTimerRemainingSeconds` を減らす Task。Start で起動、Stop / 0 到達で cancel。
+    private var sleepTimerTask: Task<Void, Never>?
+
+    /// UI 表示用のタイマー時間プリセット (分)。先頭の `nil` は Off。
+    /// `[15, 30, 45, 60, 90]` は Sleep アプリの定番値 (15 分から 1.5 時間まで段階的)。
+    let sleepTimerPresetMinutes: [Int?] = [nil, 15, 30, 45, 60, 90]
+
     private let controller: AudioEngineController
 
     /// `controller.objectWillChange` を `self.objectWillChange` に forward するための保持。
@@ -99,16 +117,26 @@ final class AudioViewModel: ObservableObject {
     /// `controller.start()` が成功した時のみ `isPlaying` を `true` にする。
     /// `AVAudioSession` 有効化や `engine.start()` が失敗した場合は `isPlaying` を `false` の
     /// まま維持し、UI と engine の整合性を保つ（Codex Task 5 レビュー指摘 5 への対応）。
+    ///
+    /// Task 23: Sleep Timer が設定されていればカウントダウン Task を起動する。
     func start() {
         if controller.start() {
             isPlaying = true
+            // Sleep Timer 設定があれば即座にカウントダウン開始。
+            if let mins = sleepTimerMinutes {
+                startSleepTimerCountdown(totalSeconds: mins * 60)
+            }
         }
     }
 
     /// 再生を停止する。fade-out 開始を依頼するが、UI 上は即時 Stopped 表示にする。
+    ///
+    /// Task 23: Sleep Timer のカウントダウン Task も同時に cancel。
+    /// `sleepTimerMinutes` の設定値自体は保持する (= 次の Start で同じタイマーで再開)。
     func stop() {
         controller.stop()
         isPlaying = false
+        cancelSleepTimerTask()
     }
 
     /// 指定 voice グループの mute / unmute をトグルする（Task 20）。
@@ -160,5 +188,69 @@ final class AudioViewModel: ObservableObject {
         if controller.setMode(mode) {
             objectWillChange.send()
         }
+    }
+
+    // MARK: - Sleep Timer (Task 23)
+
+    /// Sleep Timer 時間を設定する。`nil` で Off。
+    /// - 再生中なら即座にカウントダウン Task を起動 (既存 Task は cancel して新しい時間で再開)
+    /// - Stop 状態なら設定だけ保存し、次の Start でカウントダウン開始
+    /// - 既に同じ値が設定されていた場合は何もしない (UI tap の冗長呼出対策)
+    func setSleepTimer(minutes: Int?) {
+        guard sleepTimerMinutes != minutes else { return }
+        sleepTimerMinutes = minutes
+        if isPlaying {
+            if let mins = minutes {
+                startSleepTimerCountdown(totalSeconds: mins * 60)
+            } else {
+                // Off に変更: 動いている Task を cancel して残り表示もクリア
+                cancelSleepTimerTask()
+            }
+        }
+    }
+
+    /// 1 秒ごとに残り時間を減らす Task を起動する。
+    /// 0 到達で自動的に `stop()` を呼ぶ (= fade-out → engine.stop()、Sleep Timer 設計の核心)。
+    /// 既存 Task があれば cancel してから新しく起動する (時間変更時の再開対応)。
+    private func startSleepTimerCountdown(totalSeconds: Int) {
+        cancelSleepTimerTask()
+        sleepTimerRemainingSeconds = totalSeconds
+        sleepTimerTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            var remaining = totalSeconds
+            while remaining > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    // cancel された = stop() か setSleepTimer(Off) が走った
+                    return
+                }
+                if Task.isCancelled { return }
+                remaining -= 1
+                self.sleepTimerRemainingSeconds = remaining
+            }
+            // 時間切れ: 自動 stop (fade-out → engine.stop())
+            // 自分の Task が cancel されていないことを再度確認 (stop() 自身が
+            // cancelSleepTimerTask を呼ぶので 2 重実行を防ぐ guard)
+            if !Task.isCancelled {
+                self.stop()
+            }
+        }
+    }
+
+    /// カウントダウン Task を cancel し、残り時間表示もクリア。
+    /// `sleepTimerMinutes` の設定値自体は保持する (次の Start で再利用)。
+    private func cancelSleepTimerTask() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimerRemainingSeconds = nil
+    }
+
+    /// UI 表示用の残り時間文字列 ("mm:ss" 形式、`sleepTimerRemainingSeconds` が `nil` なら空)。
+    var sleepTimerRemainingText: String {
+        guard let secs = sleepTimerRemainingSeconds else { return "" }
+        let mins = secs / 60
+        let s = secs % 60
+        return String(format: "%d:%02d", mins, s)
     }
 }
