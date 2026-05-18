@@ -559,29 +559,16 @@ final class AudioEngineController: ObservableObject {
         return gens.contains(where: { $0.isMuted })
     }
 
-    /// 指定 voice グループに紐付く DroneGenerator 群を返す（mute API の内部実装用）。
-    /// `.grain` は DroneGenerator ではないため空配列を返し、`mutableGenerators(for:)` 経由で扱う。
-    private func droneGenerators(for group: VoiceGroup) -> [DroneGenerator] {
-        // droneGenerators 配列のインデックス対応: [0]=sub / [1]=root / [2]=5th / [3]=octave
-        // sub と octave を MIDI 範囲制約で守っているので、precondition と整合する境界を維持。
-        switch group {
-        case .sub:   return [droneGenerators[0]]
-        case .drone: return [droneGenerators[1]]
-        case .tone:  return [droneGenerators[2], droneGenerators[3]]  // E4 + octave A4 を統合
-        case .grain: return []
-        }
-    }
-
     /// VoiceGroup に紐付く mute 対応 generator 群（DroneGenerator + GrainGenerator）を統一的に扱う。
-    /// 戻り値は `setMuted` / `isMuted` を持つプロトコル準拠オブジェクト相当のクロージャ呼び出し用に
-    /// `(setMuted: (Bool) -> Void, isMuted: () -> Bool)` をまとめた構造体配列にしても良いが、
-    /// シンプルに「VoiceGroup → mute 適用」を 1 メソッドで畳むため、内部で個別 generator を呼ぶ。
+    /// 内部 droneGenerators 配列のインデックス対応: [0]=sub / [1]=root / [2]=5th / [3]=octave。
+    /// MIDI 範囲制約で守られているので、precondition と整合する境界を維持。
+    /// （メンバ変数 `droneGenerators` と関数名が衝突しないように、中間関数は持たず 1 メソッドで畳む）
     private func generators(for group: VoiceGroup) -> [VoiceMutable] {
         switch group {
-        case .sub, .drone, .tone:
-            return droneGenerators(for: group).map { VoiceMutable.drone($0) }
-        case .grain:
-            return [VoiceMutable.grain(grainGenerator)]
+        case .sub:   return [.drone(droneGenerators[0])]
+        case .drone: return [.drone(droneGenerators[1])]
+        case .tone:  return [.drone(droneGenerators[2]), .drone(droneGenerators[3])]
+        case .grain: return [.grain(grainGenerator)]
         }
     }
 
