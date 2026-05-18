@@ -59,8 +59,10 @@ final class AudioEngineController: ObservableObject {
 
     // MARK: - 動作モード
 
-    /// 動作モード。CI 起動時のみ offline に切り替え、それ以外は realtime。
-    enum Mode {
+    /// Engine の動作モード。CI 起動時のみ offline に切り替え、それ以外は realtime。
+    /// Task 21 で `EngineMode` に改名 (旧名は `Mode` だったが、ATMÓS 風モード切替 (Task 21) の
+    /// global `Mode` enum と名前衝突するため)。
+    enum EngineMode {
         /// リアルタイムでスピーカに出力する通常モード。
         case realtime
         /// CoreAudio HAL を一切触らず offline で render し、Documents/sleep-mix.wav に書く。
@@ -130,7 +132,7 @@ final class AudioEngineController: ObservableObject {
     @Published private(set) var isRunning = false
 
     /// 現在の動作モード。
-    let mode: Mode
+    let mode: EngineMode
 
     /// 現在の root note。Drone 4 声はこの note を基準に [-24, +0, +7, +12] semitone で展開される
     /// (Task 18 で sub bass A1 を追加)。`rootNote.midiNumber >= 24` を満たす必要がある
@@ -253,7 +255,7 @@ final class AudioEngineController: ObservableObject {
     init(
         rootNote: Note = Note(name: "A3") ?? Note(midiNumber: 57),
         scale: Scale = .majorPentatonic,
-        mode: Mode? = nil
+        mode: EngineMode? = nil
     ) {
         // Task 18 で sub voice を rootNote - 24 semitone (= 2 オクターブ下) に置くため、
         // rootNote.midiNumber は最低でも 24 (= C0) 以上である必要がある。default A3 (57) は満たす。
@@ -290,7 +292,7 @@ final class AudioEngineController: ObservableObject {
             // octave voice (高音域: A4 周辺、440-659Hz)
             ["A4", "B4", "C#5", "E5"].compactMap(Note.init(name:)),
         ]
-        let resolvedMode: Mode
+        let resolvedMode: EngineMode
         if let mode = mode {
             resolvedMode = mode
         } else {
