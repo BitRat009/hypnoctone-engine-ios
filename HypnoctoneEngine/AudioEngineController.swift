@@ -70,6 +70,11 @@ final class AudioEngineController: ObservableObject {
     /// VoiceGroup → mute 対応 generator を統一的に扱うための薄いラッパー。
     /// DroneGenerator と GrainGenerator は protocol を共有していないため、
     /// 関連値で 1 段抽象化する（NoiseGenerator は voice group に紐付かないため含めない）。
+    ///
+    /// `@MainActor` 必須: `setMuted` / `isMuted` は `@MainActor` 隔離の Generator メソッドを呼ぶため
+    /// ネスト enum 自体も `@MainActor` で囲まないと Swift 5.7+ で isolation 違反コンパイルエラーに
+    /// なる（Codex Task 20 ビルドエラー診断指摘）。
+    @MainActor
     private enum VoiceMutable {
         case drone(DroneGenerator)
         case grain(GrainGenerator)

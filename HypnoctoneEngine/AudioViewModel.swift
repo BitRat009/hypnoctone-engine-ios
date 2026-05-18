@@ -35,17 +35,31 @@ final class AudioViewModel: ObservableObject {
     /// 現在のスケール名（"MajPentatonic" 等）。UI 表示用。
     var scaleName: String { controller.scale.shortName }
 
-    /// 4 voice グループ (TONE/DRONE/SUB/GRAIN) の代表 note 名（UI 表示用、Task 20）。
+    /// 4 voice グループ (TONE/DRONE/SUB/GRAIN) の表示用 1 行（UI 表示用、Task 20）。
+    /// `Identifiable` 準拠の struct にしておくと SwiftUI の ForEach に直接渡せる
+    /// （tuple labeled keypath は SwiftUI + Xcode 16 系で診断が不安定になりやすいため避ける、
+    /// Codex Task 20 ビルドエラー診断指摘）。
+    struct VoiceGroupItem: Identifiable {
+        let group: AudioEngineController.VoiceGroup
+        let label: String
+        let noteName: String
+        let isMuted: Bool
+
+        var id: AudioEngineController.VoiceGroup { group }
+    }
+
+    /// 4 voice グループの表示用配列（UI 表示用、Task 20）。
     /// 順序は `AudioEngineController.VoiceGroup.allCases` と同じ ([.tone, .drone, .sub, .grain])。
-    /// 各要素は `(group, label, noteName, isMuted)` のタプルで MainView から直接 ForEach できる。
     /// `controller.currentDroneNotes` の @Published 変化は init で forward しているので
     /// 動的 pitch 変化 (Task 16 再有効化時) でも UI が自動更新される。
-    var voiceGroups: [(group: AudioEngineController.VoiceGroup, label: String, noteName: String, isMuted: Bool)] {
+    var voiceGroups: [VoiceGroupItem] {
         AudioEngineController.VoiceGroup.allCases.map { g in
-            (group: g,
-             label: g.label,
-             noteName: controller.displayNoteName(for: g),
-             isMuted: controller.isMuted(g))
+            VoiceGroupItem(
+                group: g,
+                label: g.label,
+                noteName: controller.displayNoteName(for: g),
+                isMuted: controller.isMuted(g)
+            )
         }
     }
 

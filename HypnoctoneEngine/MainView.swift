@@ -82,9 +82,10 @@ struct MainView: View {
     }
 
     /// 4 voice グループの横並びグリッド (ATMÓS 風)。
+    /// `voiceGroups` の各要素は `Identifiable` (VoiceGroupItem) なので id 引数不要。
     private var voiceGrid: some View {
         HStack(spacing: 8) {
-            ForEach(viewModel.voiceGroups, id: \.label) { vg in
+            ForEach(viewModel.voiceGroups) { vg in
                 voiceCell(label: vg.label, noteName: vg.noteName, isMuted: vg.isMuted) {
                     viewModel.toggleMute(vg.group)
                 }
