@@ -119,7 +119,10 @@ final class ToneRenderState {
     let detuneCents: Double
 
     /// 定常状態の基本振幅。
-    let defaultAmplitude: Float
+    /// Task 21 で var 化: Mode 切替 (Stop 状態のみ) で `setDefaultAmplitude` から更新可能。
+    /// scheduleFadeIn が次回読み取った時に最新値が target になる。
+    /// audio thread が動いていない時 (engine.stop() 完了後) のみ書き換える契約。
+    var defaultAmplitude: Float
 
     // MARK: - Audio thread 単一所有 — current pitch（glide 中に書き換わる）
 

@@ -82,19 +82,21 @@ final class GrainRenderState {
     let twoPi: Double = 2.0 * Double.pi
 
     /// 定常状態の基本振幅（grain 1 個あたりの最大振幅）。同時 N 個で peak は N 倍まで可能。
-    let defaultAmplitude: Float
+    /// Task 21 で var 化: Mode 切替 (Stop 状態のみ) で更新可能。
+    var defaultAmplitude: Float
 
     /// 1 つの grain のフレーム数（duration × sampleRate）。
     let grainDurationFrames: Int
 
     /// trigger 間隔の平均フレーム数（`sampleRate / expectedTriggersPerSecond`）。
     /// 実際の trigger 間隔は `mean × (0.5 + random)` の uniform 揺らぎを掛けて Poisson 過程を
-    /// 近似する。
-    let meanInterTriggerFrames: Double
+    /// 近似する。Task 21 で var 化: Mode 切替で grain rate を変更可能 (Stop 状態のみ)。
+    var meanInterTriggerFrames: Double
 
     /// trigger 時に選択する pitch 候補（phaseIncrement = 2π × freq / sampleRate）。
     /// 配列要素数は通常 2〜8 程度。各 grain は uniform random で選んだ index に固定。
-    let pitchPhaseIncrements: [Double]
+    /// Task 21 で var 化: Mode 切替で pitch 候補を変更可能 (Stop 状態のみ)。
+    var pitchPhaseIncrements: [Double]
 
     /// 同時 active grain の最大数。プール固定容量。
     /// 8 程度あれば 60ms grain × 2 triggers/sec の最大重なり (0.06 × 2 × 2 = 0.24 同時稼働) より

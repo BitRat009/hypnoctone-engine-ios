@@ -120,4 +120,30 @@ final class AudioViewModel: ObservableObject {
         controller.setMuted(group, next)
         objectWillChange.send()
     }
+
+    // MARK: - Mode 切替 (Task 21)
+
+    /// 現在のモード (UI 表示用)。`controller.currentMode` の @Published 変化は init で
+    /// objectWillChange を forward しているので UI に自動反映される。
+    var currentMode: Mode { controller.currentMode }
+
+    /// UI 表示用 BPM (ATMÓS の "BPM 30" 表記再現)。
+    var bpm: Int { controller.currentMode.preset.bpm }
+
+    /// 現在のモードで Mode 切替可能か (Stop 状態でのみ可能、Task 21 設計)。
+    /// UI でモードボタンを enable/disable する判定に使う。
+    /// - `!isPlaying`: ユーザーが Stop ボタンを押した直後の即時反映
+    /// - `!controller.isRunning`: fade-out 完了まで待つ (engine がまだ生きているうちは false)
+    /// 両方の AND で「fade-out 完了後の完全 Stop 状態」を判定する (Codex Task 21 High 指摘反映)。
+    var canChangeMode: Bool { !isPlaying && !controller.isRunning }
+
+    /// モードを切り替える (Task 21)。
+    /// `isPlaying` 中 (engine 動作中) は controller 側で ignore される。
+    /// 成功時のみ objectWillChange を発火 (controller の @Published currentMode 経由でも
+    /// 通知は走るが、即時反映を保証するため明示送信)。
+    func setMode(_ mode: Mode) {
+        if controller.setMode(mode) {
+            objectWillChange.send()
+        }
+    }
 }

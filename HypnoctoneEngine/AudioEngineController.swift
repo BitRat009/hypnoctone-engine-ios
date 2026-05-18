@@ -125,7 +125,9 @@ final class AudioEngineController: ObservableObject {
 
     /// エンジンが動作中かどうか。
     /// fade-out 中は `true` のままで、engine.stop() 完了後に `false` になる。
-    private(set) var isRunning = false
+    /// Task 21 で @Published 化: UI 側 (AudioViewModel.canChangeMode) が fade-out 完了を
+    /// 待ってからモード切替を有効化するため (Codex Task 21 High 指摘)。
+    @Published private(set) var isRunning = false
 
     /// 現在の動作モード。
     let mode: Mode
@@ -142,6 +144,11 @@ final class AudioEngineController: ObservableObject {
     /// 初期値は [root-24 (sub), root, root+7 (5th), root+12 (octave)]。PitchScheduler が
     /// 時間軸で候補リストから選び直すたびに更新される。
     @Published private(set) var currentDroneNotes: [Note]
+
+    /// 現在のモード (Task 21, ATMÓS 風 4 モード切替)。
+    /// デフォルトは `.sleep` (Task 20 までの動作と互換)。
+    /// 切替は `setMode(_:)` で行うが、現状は Stop 状態でのみ可能 (engine 動作中は ignore + 警告ログ)。
+    @Published private(set) var currentMode: Mode = .sleep
 
     // MARK: - PitchScheduler (Task 16: ATMÓS 化 Step 2 — generative pitch selection)
 
@@ -535,6 +542,57 @@ final class AudioEngineController: ObservableObject {
     func setVolume(_ value: Float) {
         let clamped = min(max(value, 0.0), 1.0)
         engine.mainMixerNode.outputVolume = clamped
+    }
+
+    // MARK: - Mode 切替 (Task 21)
+
+    /// モードを切り替える (SLEEP / FOCUS / MEDITATE / RELAX)。
+    ///
+    /// **engine 動作中は ignore + 警告ログ** (ATMÓS の "Stop playback to change mode" と同じ設計)。
+    /// 各 generator のパラメータ (defaultAmplitude / grain rate / grain pitches) を書き換える際に
+    /// audio thread が動いていない状態を保証するため。realtime / offline どちらでも engine.stop()
+    /// 完了後 (isRunning=false) なら呼べる。
+    ///
+    /// Reverb wetDryMix だけは AVAudioUnit のスレッド安全な property なので engine 動作中でも
+    /// 設定可能だが、設計の一貫性のため Stop 中に限定する。
+    /// - Parameter mode: 切替先のモード。
+    /// - Returns: 適用に成功したら true、isRunning ガードで弾かれたら false。
+    @discardableResult
+    func setMode(_ mode: Mode) -> Bool {
+        guard !isRunning else {
+            logger.warning("setMode は engine 停止中のみ可能 (isRunning=true)。再生中のモード切替は ignore。")
+            return false
+        }
+        applyPreset(mode.preset)
+        currentMode = mode
+        logger.info("Mode switched to: \(mode.rawValue, privacy: .public)")
+        return true
+    }
+
+    /// プリセット値を全 generator + reverb に一括適用する。
+    /// `setMode` 内部実装。直接呼ばないこと (isRunning ガードを通さないため)。
+    private func applyPreset(_ preset: ModePreset) {
+        // 4 voice 構成の invariant 明示 (Codex Task 21 Medium 指摘)。
+        // 将来 voice 数を変える場合、ここの index アクセスと ModePreset のフィールドを揃えること。
+        precondition(droneGenerators.count == 4,
+                     "applyPreset requires exactly 4 drone voices (sub/root/5th/octave). got \(droneGenerators.count)")
+        // Drone 4 voice の amp 更新 (配列順: sub / root / 5th / octave)。
+        droneGenerators[0].setDefaultAmplitude(preset.subAmp)
+        droneGenerators[1].setDefaultAmplitude(preset.rootAmp)
+        droneGenerators[2].setDefaultAmplitude(preset.fifthAmp)
+        droneGenerators[3].setDefaultAmplitude(preset.octaveAmp)
+
+        // Noise の amp 更新。
+        noiseGenerator.setDefaultAmplitude(preset.noiseAmp)
+
+        // Grain の amp / trigger rate / pitch 候補を更新。
+        grainGenerator.setDefaultAmplitude(preset.grainAmp)
+        grainGenerator.setTriggerRate(triggersPerSecond: preset.grainTriggersPerSecond)
+        grainGenerator.setPitches(preset.grainPitches)
+
+        // Reverb の wet/dry ミックス比を更新。AVAudioUnitReverb の wetDryMix は
+        // AVAudioUnit のプロパティで、Stop 中なら確実に安全。
+        reverbNode.wetDryMix = preset.reverbWetDryMix
     }
 
     // MARK: - Voice mute (Task 20)

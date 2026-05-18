@@ -665,7 +665,45 @@ ATMÓS の 4 voice 構成 (TONE / DRONE / SUB / GRAIN) のうち最後の GRAIN 
       - Low 1 (.tone の 2 generator 順次 setMuted の理論的ずれ) → コメントに「ns オーダーの連続 store なので
         audio block を跨ぐ確率ゼロ」と明記、現状維持で OK
       - Low 2 (`·` U+00B7 区切り) → 既存コードと一貫しているので変更なし
-- [ ] Phase 7: push → CI → artifacts_025 で 4 voice グループ UI を確認
-      - WAV: 全 voice ON 状態 (mute は UI 操作なので CI では発火しない) で既存検査全 PASS
-      - screenshot: TONE/DRONE/SUB/GRAIN 4 列 + 各 Note 名 + MUTE ボタン表示
-      - 実機テスト準備としての視覚 + API 整備が完了
+- [x] Phase 7: push → CI → artifacts_025 で 4 voice グループ UI を確認 (完全成功)
+      - 初回 ビルド失敗 → droneGenerators 関数/変数の同名衝突を修正 (commit de9e7a5)
+      - 2 回目 ビルド失敗 → VoiceMutable に @MainActor、tuple keypath を Identifiable struct に置換 (commit 5d083d6)
+      - 3 回目 ビルド成功 + 全数値検証 PASS (artifacts_024 と完全同値、副作用なし実証)
+      - screenshot: TONE(E4·A4) / DRONE(A3) / SUB(A1) / GRAIN(C#5/E5/F#5/A5) + MUTE ボタン表示 ✓
+
+## Task 21 — ATMÓS 風 4 モード切替 (SLEEP / FOCUS / MEDITATE / RELAX) audio 層
+
+ATMÓS の 4 モード切替を audio パラメータプリセットとして実装。Stop 状態でのみ切替可能
+("Stop playback to change mode" 設計)。UI は Task 22 で。
+
+### 設計
+
+- **Stop 状態でのみ Mode 切替可能**: engine.stop() 完了後 (isRunning=false) なら audio thread が動かないので
+  各 generator のパラメータ (defaultAmplitude / grain rate / pitches / reverb wet) を atomic publish なしで安全に書き換え可能
+- **rootNote / scale は全モード共通 (A3 MajPentatonic)** で audio path 簡略化
+- **可変パラメータ**: 各 drone amp (4 voice) / noise amp / grain rate / grain amp / grain pitches / reverb wet / BPM 表示
+- **SLEEP プリセット = Task 20 までの現状値** → CI 互換性維持
+
+### Phase
+
+- [x] Phase 1: Modes.swift で Mode enum + ModePreset + 4 プリセット定義
+      - 4 モードの static let プリセット
+      - 各モードの音響特徴: SLEEP δ-θ波 / FOCUS β波 / MEDITATE θ波 / RELAX α波
+- [x] Phase 2: 各 RenderState の必要フィールドを var 化 + Generator に setter API
+      - ToneRenderState/NoiseRenderState の defaultAmplitude を var
+      - GrainRenderState の defaultAmplitude / meanInterTriggerFrames / pitchPhaseIncrements を var
+      - 各 Generator に setDefaultAmplitude、Grain に setTriggerRate + setPitches
+- [x] Phase 3: AudioEngineController に currentMode + setMode + applyPreset
+      - @Published currentMode (default sleep)、@discardableResult setMode(_:) -> Bool
+      - isRunning ガードで Stop 中限定、applyPreset で全 generator + reverb wet を一括更新
+- [x] Phase 4: Codex クロスレビュー
+      - 1 回目: **Critical 1 (Generator 側に重複 let defaultAmplitude が残っていて setter が無効)** + High 1 + Medium 2
+      - Critical 反映: 各 Generator の defaultAmplitude を computed property `{ renderState.defaultAmplitude }` に
+      - High 反映: AudioEngineController.isRunning を @Published 化、canChangeMode = !isPlaying && !controller.isRunning
+      - Medium 1 反映: setTriggerRate で framesUntilNextTrigger を新 mean ベースに再初期化
+      - Medium 2 反映: applyPreset 冒頭に precondition(droneGenerators.count == 4)
+      - 2 回目: 全指摘解消、最終 OK
+- [ ] Phase 5: push → CI → artifacts_026 で SLEEP 互換性確認
+      - 既存テストは SLEEP モードで実行 (default) → WAV 数値が artifacts_025 と完全同値であることを確認
+      - = Task 21 の audio 層変更が副作用を出していない実証
+      - mode 切替は CI では発火しない (UI 操作系のため Task 22 で発火確認)

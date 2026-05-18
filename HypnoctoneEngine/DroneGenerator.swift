@@ -40,7 +40,10 @@ final class DroneGenerator {
     let sourceFormat: AVAudioFormat
 
     /// 定常時の振幅（フェード完了後の目標値）。
-    let defaultAmplitude: Float
+    /// Task 21 で computed property 化: ストレージは `renderState.defaultAmplitude` 1 つに統一し、
+    /// `setDefaultAmplitude` 経由で更新される値を `scheduleFadeIn` が拾えるようにする
+    /// (Codex Task 21 Critical 指摘: 旧 let フィールドが残ったままだと Mode 切替が effective に効かない)。
+    var defaultAmplitude: Float { renderState.defaultAmplitude }
 
     /// レンダリングのサンプルレート（Hz）。fade 持続時間からフレーム数を計算する側で参照する。
     let sampleRate: Double
@@ -87,7 +90,6 @@ final class DroneGenerator {
     ) {
         self.sourceFormat = format
         self.sampleRate = format.sampleRate
-        self.defaultAmplitude = defaultAmplitude
         self.renderState = ToneRenderState(
             frequency: frequency,
             sampleRate: format.sampleRate,
@@ -429,6 +431,20 @@ final class DroneGenerator {
         // 3) writer 完了マーク (even)
         let newGen = renderState.pendingPitchGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Drone pitch set: \(frequency, privacy: .public)Hz glide=\(glideSeconds, privacy: .public)s gen=\(newGen)")
+    }
+
+    // MARK: - Mode 切替（Task 21）
+
+    /// 定常時の amp (defaultAmplitude) を更新する。次回 `scheduleFadeIn(duration:)` を呼んだ時に
+    /// 新しい値を target として fade される。
+    ///
+    /// **必ず engine.stop() 完了後 (audio thread 動いていない) に呼ぶこと**。
+    /// render block は defaultAmplitude を直接読まないが、scheduleFadeIn が relaxed store する
+    /// 値の source として読むため、Stop 中なら race なし。
+    /// AudioEngineController.setMode が isRunning ガードを掛けて呼ぶ前提。
+    func setDefaultAmplitude(_ amp: Float) {
+        renderState.defaultAmplitude = amp
+        logger.info("Drone defaultAmplitude updated: \(amp, privacy: .public)")
     }
 
     // MARK: - Mute（Task 20）

@@ -48,7 +48,8 @@ final class NoiseRenderState {
 
     /// 定常状態の基本振幅。Drone (0.2) より控えめにして混ぜたときに耳ざわりにならない量。
     /// lowpass で高域カットして RMS が下がる分、Task 11 時点の 0.05 から少し上げる想定。
-    let defaultAmplitude: Float
+    /// Task 21 で var 化: Mode 切替 (Stop 状態のみ) で更新可能。詳細は ToneRenderState 参照。
+    var defaultAmplitude: Float
 
     // MARK: - 定数 — Lowpass + cutoff LFO
 

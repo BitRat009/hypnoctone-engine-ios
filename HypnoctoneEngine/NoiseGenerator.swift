@@ -46,7 +46,9 @@ final class NoiseGenerator {
     let sourceFormat: AVAudioFormat
 
     /// 定常時の振幅（フェード完了後の目標値）。
-    let defaultAmplitude: Float
+    /// Task 21 で computed property 化: ストレージは `renderState.defaultAmplitude` 1 つに統一。
+    /// 詳細は `DroneGenerator.defaultAmplitude` 参照。
+    var defaultAmplitude: Float { renderState.defaultAmplitude }
 
     /// レンダリングのサンプルレート（Hz）。fade 持続時間からフレーム数を計算する側で参照する。
     let sampleRate: Double
@@ -84,7 +86,6 @@ final class NoiseGenerator {
     ) {
         self.sourceFormat = format
         self.sampleRate = format.sampleRate
-        self.defaultAmplitude = defaultAmplitude
         self.renderState = NoiseRenderState(
             sampleRate: format.sampleRate,
             defaultAmplitude: defaultAmplitude,
@@ -298,6 +299,15 @@ final class NoiseGenerator {
         renderState.pendingFadeFrames.store(frames, ordering: .relaxed)
         let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Noise fade-out scheduled: target=0 frames=\(frames) gen=\(newGen)")
+    }
+
+    // MARK: - Mode 切替（Task 21）
+
+    /// 定常時の amp を更新する。詳細は `DroneGenerator.setDefaultAmplitude` 参照。
+    /// **engine.stop() 完了後のみ呼ぶこと**。
+    func setDefaultAmplitude(_ amp: Float) {
+        renderState.defaultAmplitude = amp
+        logger.info("Noise defaultAmplitude updated: \(amp, privacy: .public)")
     }
 
     // MARK: - Mute（Task 20）

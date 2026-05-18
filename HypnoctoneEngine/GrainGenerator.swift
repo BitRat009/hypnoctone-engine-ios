@@ -43,7 +43,9 @@ final class GrainGenerator {
     let sourceFormat: AVAudioFormat
 
     /// 定常時の振幅（fade 完了後の外側 envelope target）。
-    let defaultAmplitude: Float
+    /// Task 21 で computed property 化: ストレージは `renderState.defaultAmplitude` 1 つに統一。
+    /// 詳細は `DroneGenerator.defaultAmplitude` 参照。
+    var defaultAmplitude: Float { renderState.defaultAmplitude }
 
     /// レンダリングのサンプルレート（Hz）。
     let sampleRate: Double
@@ -83,7 +85,6 @@ final class GrainGenerator {
     ) {
         self.sourceFormat = format
         self.sampleRate = format.sampleRate
-        self.defaultAmplitude = defaultAmplitude
         self.renderState = GrainRenderState(
             sampleRate: format.sampleRate,
             defaultAmplitude: defaultAmplitude,
@@ -323,6 +324,43 @@ final class GrainGenerator {
         renderState.pendingFadeFrames.store(frames, ordering: .relaxed)
         let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Grain fade-out scheduled: target=0 frames=\(frames) gen=\(newGen)")
+    }
+
+    // MARK: - Mode 切替（Task 21）
+
+    /// 定常時の amp を更新する。詳細は `DroneGenerator.setDefaultAmplitude` 参照。
+    /// **engine.stop() 完了後のみ呼ぶこと**。
+    func setDefaultAmplitude(_ amp: Float) {
+        renderState.defaultAmplitude = amp
+        logger.info("Grain defaultAmplitude updated: \(amp, privacy: .public)")
+    }
+
+    /// Grain trigger 期待値 (1 channel あたり 1 秒間の発火数) を更新する。
+    /// **engine.stop() 完了後のみ呼ぶこと** (render block が meanInterTriggerFrames を読んでいる
+    /// 最中の書き換えは race)。
+    ///
+    /// 次 trigger までのカウンタ (`framesUntilNextTriggerLeft/Right`) も新 mean ベースに再初期化する。
+    /// これで前モードの残カウンタが次回 start 時の grain 発火タイミングに影響しなくなる
+    /// (Codex Task 21 Medium 指摘: mode preset の再現性向上)。
+    /// - Parameter triggersPerSecond: 1 channel あたりの期待 trigger 数 (> 0)。
+    func setTriggerRate(triggersPerSecond: Double) {
+        precondition(triggersPerSecond > 0, "GrainGenerator.setTriggerRate: triggersPerSecond must be > 0")
+        let newMean = sampleRate / triggersPerSecond
+        renderState.meanInterTriggerFrames = newMean
+        // L/R 別の初期 offset を新 mean ベースで設定 (init と同じ 0.6 / 1.1 倍)。
+        renderState.framesUntilNextTriggerLeft = Int(newMean * 0.6)
+        renderState.framesUntilNextTriggerRight = Int(newMean * 1.1)
+        logger.info("Grain trigger rate updated: \(triggersPerSecond, privacy: .public) /s")
+    }
+
+    /// Grain 候補 pitch を更新する。
+    /// **engine.stop() 完了後のみ呼ぶこと** (render block が pitchPhaseIncrements を読んでいる
+    /// 最中の書き換えは配列の subscript アクセスで race)。
+    /// - Parameter frequencies: 候補 pitch (Hz) の配列。空配列は不可。
+    func setPitches(_ frequencies: [Double]) {
+        precondition(!frequencies.isEmpty, "GrainGenerator.setPitches: frequencies must not be empty")
+        renderState.pitchPhaseIncrements = frequencies.map { 2.0 * Double.pi * $0 / sampleRate }
+        logger.info("Grain pitches updated: \(frequencies.count) candidates")
     }
 
     // MARK: - Mute（Task 20）
