@@ -35,11 +35,19 @@ final class AudioViewModel: ObservableObject {
     /// 現在のスケール名（"MajPentatonic" 等）。UI 表示用。
     var scaleName: String { controller.scale.shortName }
 
-    /// 現在鳴っている Drone 3 声の note 名（["A3", "E4", "A4"]）。UI 表示用。
-    /// Task 16 から generative pitch selection で時間軸に変化する。
-    /// `controller.currentDroneNotes` は @Published で、init で objectWillChange を
-    /// forward しているので変化が UI に自動反映される。
-    var droneNoteNames: [String] { controller.currentDroneNotes.map(\.name) }
+    /// 4 voice グループ (TONE/DRONE/SUB/GRAIN) の代表 note 名（UI 表示用、Task 20）。
+    /// 順序は `AudioEngineController.VoiceGroup.allCases` と同じ ([.tone, .drone, .sub, .grain])。
+    /// 各要素は `(group, label, noteName, isMuted)` のタプルで MainView から直接 ForEach できる。
+    /// `controller.currentDroneNotes` の @Published 変化は init で forward しているので
+    /// 動的 pitch 変化 (Task 16 再有効化時) でも UI が自動更新される。
+    var voiceGroups: [(group: AudioEngineController.VoiceGroup, label: String, noteName: String, isMuted: Bool)] {
+        AudioEngineController.VoiceGroup.allCases.map { g in
+            (group: g,
+             label: g.label,
+             noteName: controller.displayNoteName(for: g),
+             isMuted: controller.isMuted(g))
+        }
+    }
 
     private let controller: AudioEngineController
 
@@ -87,5 +95,15 @@ final class AudioViewModel: ObservableObject {
     func stop() {
         controller.stop()
         isPlaying = false
+    }
+
+    /// 指定 voice グループの mute / unmute をトグルする（Task 20）。
+    /// audio 層は 10ms ramp で 0/1 に補間するためクリックノイズなし。
+    /// objectWillChange を明示的に発火して UI を即時更新する（controller 側は @Published
+    /// プロパティではなく atomic flag を更新するだけなので forward が走らない）。
+    func toggleMute(_ group: AudioEngineController.VoiceGroup) {
+        let next = !controller.isMuted(group)
+        controller.setMuted(group, next)
+        objectWillChange.send()
     }
 }

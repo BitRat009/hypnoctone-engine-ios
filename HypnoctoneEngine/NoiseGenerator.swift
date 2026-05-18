@@ -150,6 +150,13 @@ final class NoiseGenerator {
                 envelopeMultiplier = 1.0
             }
 
+            // ---- Mute flag を読み、補間ループ内で per-sample に target に近づける（Task 20） ----
+            // 詳細は DroneGenerator の同等コメント参照。
+            let isMutedNow = state.mutedFlag.load(ordering: .relaxed) != 0
+            let muteTarget: Float = isMutedNow ? 0.0 : 1.0
+            let muteStep = state.muteRampStepPerFrame
+            var muteMultiplier = state.currentMuteMultiplier
+
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             var amplitude = state.currentAmplitude
             let target = state.activeTargetAmplitude
@@ -212,8 +219,15 @@ final class NoiseGenerator {
                 lpL += alpha * (pinkL - lpL)
                 lpR += alpha * (pinkR - lpR)
 
-                let sampleL = lpL * amplitude * envelopeMultiplier
-                let sampleR = lpR * amplitude * envelopeMultiplier
+                // Mute multiplier を target に向けて 1 サンプル分近づける（Task 20）。
+                if muteMultiplier < muteTarget {
+                    muteMultiplier = min(muteMultiplier + muteStep, muteTarget)
+                } else if muteMultiplier > muteTarget {
+                    muteMultiplier = max(muteMultiplier - muteStep, muteTarget)
+                }
+
+                let sampleL = lpL * amplitude * envelopeMultiplier * muteMultiplier
+                let sampleR = lpR * amplitude * envelopeMultiplier * muteMultiplier
 
                 if isStereo {
                     bufferL[frame] = sampleL
@@ -249,6 +263,7 @@ final class NoiseGenerator {
             state.lpR = lpR
             state.filterLfoPhase = filterLfoPhase
             state.envelopePhase = envelopePhase
+            state.currentMuteMultiplier = muteMultiplier
             return noErr
         }
     }
@@ -283,6 +298,19 @@ final class NoiseGenerator {
         renderState.pendingFadeFrames.store(frames, ordering: .relaxed)
         let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Noise fade-out scheduled: target=0 frames=\(frames) gen=\(newGen)")
+    }
+
+    // MARK: - Mute（Task 20）
+
+    /// Mute 状態を設定する。詳細は `DroneGenerator.setMuted(_:)` 参照。
+    func setMuted(_ muted: Bool) {
+        renderState.mutedFlag.store(muted ? 1 : 0, ordering: .relaxed)
+        logger.info("Noise mute set: \(muted ? "MUTED" : "UNMUTED", privacy: .public)")
+    }
+
+    /// 現在の mute 意図（UI 表示用）。
+    var isMuted: Bool {
+        renderState.mutedFlag.load(ordering: .relaxed) != 0
     }
 
     // MARK: - 状態参照

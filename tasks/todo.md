@@ -625,9 +625,47 @@ ATMÓS の 4 voice 構成 (TONE / DRONE / SUB / GRAIN) のうち最後の GRAIN 
       - 3 回目: 最終 OK、Critical/High/Medium 追加指摘なし
       - 確認済み: data race なし / atomic ordering 妥当 / audio thread 負荷問題なし /
         pitch scale 整合 OK / window 端点 微小値で実用上問題なし
-- [ ] Phase 5: push → CI → artifacts_024 で GRAIN を実証
-      - WAV stereo 18.09s、L/R 検査クリア、crash 無し
-      - 740Hz 帯 MAX >= 200 で L/R 両 ch、740/1200 比 >= 1.5
-      - 手動 Goertzel で C#5/E5/F#5/A5 のいずれかにピーク観察 (sample-and-hold)
-      - reverb tail が grain trigger 後にも続く (shimmer 残響)
-      - 実機聴取で「ATMÓS 的なぽつりぽつりと光る音」評価
+- [x] Phase 5: push → CI → artifacts_024 で GRAIN を実証 (完全成功)
+      - WAV stereo 18.09s ✓、L_MAX=4297/R_MAX=4535/DIFF_MAX=3416 ✓、crash 無し (pid 1768)
+      - 候補帯 MAX: C#5=250/244, E5=438/417, F#5=285/286, A5=342/349 (L/R)
+      - REF 1200Hz: L=53 / R=49 → CLEAN_MAX/REF = 5.38x (L) / 5.84x (R) ≫ 1.5 ✓
+      - reverb tail: TAIL_L 59→97.9 (+66%) = GRAIN trigger の shimmer 残響を実証
+      - 実機聴取は実機テスト準備が整ってからの方針
+
+## Task 20 — UI 4 voice グループ化 + 各 voice 独立 MUTE
+
+実機テスト時に「TONE / DRONE / SUB / GRAIN を 1 つずつ ON/OFF」して聴感調整するための
+基盤整備。ATMÓS の UI 構造に近づけつつ、audio 層は変更最小 (mute multiplier を別レイヤーで追加)。
+
+### 設計
+
+- **mute は fade と独立した別レイヤー**: 出力 = generator × fade_amp × mute_mult
+- **10ms ramp** で per-sample 補間し、クリックノイズ回避 (1/441 ≈ 0.00227 step)
+- **atomic flag は relaxed**: payload 公開ではなく単一意図伝達なので acquire/release 不要
+- **VoiceGroup マッピング**:
+  - TONE = droneGenerators[2] (E4) + droneGenerators[3] (octave A4) 統合
+  - DRONE = droneGenerators[1] (root A3)
+  - SUB = droneGenerators[0] (sub bass A1)
+  - GRAIN = grainGenerator
+  - Noise は背景レイヤーで UI 対象外 (API は実装済み、将来「RAIN」slot 追加可能)
+
+### Phase
+
+- [x] Phase 1: 各 RenderState に mute multiplier (mutedFlag + currentMuteMultiplier + step 定数) を追加
+- [x] Phase 2: 各 Generator (Drone/Noise/Grain) に setMuted / isMuted API を追加
+      - render block ループ内で per-sample に target に近づける (方向転換にも対応)
+- [x] Phase 3: AudioEngineController に VoiceGroup enum + setMuted(group:, muted:) / isMuted(group:) /
+      displayNoteName(for:) API。VoiceMutable 内部 enum で DroneGenerator/GrainGenerator を統一扱い
+- [x] Phase 4: AudioViewModel に voiceGroups (4 タプル配列) + toggleMute(group:)
+      objectWillChange.send() で UI 即時更新
+- [x] Phase 5: MainView を 4 voice グリッド表示に再構築 (voiceGrid + voiceCell)
+      各 cell: ラベル + Note 名 + MUTE ボタン、MUTE 状態で視覚的に区別
+      Stopped 状態でも見える → CI screenshot で確認可能
+- [x] Phase 6: Codex クロスレビュー → Critical/High/Medium なし、Low 2 件
+      - Low 1 (.tone の 2 generator 順次 setMuted の理論的ずれ) → コメントに「ns オーダーの連続 store なので
+        audio block を跨ぐ確率ゼロ」と明記、現状維持で OK
+      - Low 2 (`·` U+00B7 区切り) → 既存コードと一貫しているので変更なし
+- [ ] Phase 7: push → CI → artifacts_025 で 4 voice グループ UI を確認
+      - WAV: 全 voice ON 状態 (mute は UI 操作なので CI では発火しない) で既存検査全 PASS
+      - screenshot: TONE/DRONE/SUB/GRAIN 4 列 + 各 Note 名 + MUTE ボタン表示
+      - 実機テスト準備としての視覚 + API 整備が完了

@@ -143,6 +143,17 @@ final class NoiseRenderState {
     /// fade コマンドの世代番号。odd: writer 書き込み中、even: 公開済み。
     let pendingGeneration = ManagedAtomic<Int>(0)
 
+    // MARK: - Main writer / Audio reader（mute, Task 20）— 詳細は ToneRenderState 参照
+
+    /// Mute state（0=unmuted, 1=muted）。relaxed store/load の単一フィールド。
+    let mutedFlag = ManagedAtomic<UInt8>(0)
+
+    /// 現在の mute multiplier（audio thread 単一所有、補間後の値、0.0〜1.0）。
+    var currentMuteMultiplier: Float = 1.0
+
+    /// 1 サンプルあたりの mute ramp step（10ms ramp、44.1kHz で約 0.00227）。
+    let muteRampStepPerFrame: Float
+
     // MARK: - 初期化
 
     /// - Parameters:
@@ -181,5 +192,8 @@ final class NoiseRenderState {
             self.envelopePhaseIncrement = 0.0
         }
         self.envelopePhase = envelopeInitialPhase
+
+        // Mute ramp 10ms: クリックノイズ回避できる最短時間。Tone/Grain と同じ。
+        self.muteRampStepPerFrame = Float(1.0 / (0.010 * sampleRate))
     }
 }

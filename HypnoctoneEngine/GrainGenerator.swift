@@ -132,6 +132,13 @@ final class GrainGenerator {
                 envelopeMultiplier = 1.0
             }
 
+            // ---- Mute flag を読み、補間ループ内で per-sample に target に近づける（Task 20） ----
+            // 詳細は DroneGenerator の同等コメント参照。
+            let isMutedNow = state.mutedFlag.load(ordering: .relaxed) != 0
+            let muteTarget: Float = isMutedNow ? 0.0 : 1.0
+            let muteStep = state.muteRampStepPerFrame
+            var muteMultiplier = state.currentMuteMultiplier
+
             // ---- 補間ループ ----
             var amplitude = state.currentAmplitude
             let target = state.activeTargetAmplitude
@@ -255,10 +262,17 @@ final class GrainGenerator {
                     state.activeGrains[slot] = g
                 }
 
-                // 外側 envelope と LFO envelope を乗算。grain 1 個の peak が defaultAmplitude
+                // Mute multiplier を target に向けて 1 サンプル分近づける（Task 20）。
+                if muteMultiplier < muteTarget {
+                    muteMultiplier = min(muteMultiplier + muteStep, muteTarget)
+                } else if muteMultiplier > muteTarget {
+                    muteMultiplier = max(muteMultiplier - muteStep, muteTarget)
+                }
+
+                // 外側 envelope と LFO envelope と mute を乗算。grain 1 個の peak が defaultAmplitude
                 // になるように amplitude を掛ける。
-                let outL = sumL * amplitude * envelopeMultiplier
-                let outR = sumR * amplitude * envelopeMultiplier
+                let outL = sumL * amplitude * envelopeMultiplier * muteMultiplier
+                let outR = sumR * amplitude * envelopeMultiplier * muteMultiplier
 
                 if isStereo {
                     bufferL[frame] = outL
@@ -282,6 +296,7 @@ final class GrainGenerator {
             state.framesUntilNextTriggerLeft = nextTriggerL
             state.framesUntilNextTriggerRight = nextTriggerR
             state.envelopePhase = envelopePhase
+            state.currentMuteMultiplier = muteMultiplier
             return noErr
         }
     }
@@ -308,6 +323,19 @@ final class GrainGenerator {
         renderState.pendingFadeFrames.store(frames, ordering: .relaxed)
         let newGen = renderState.pendingGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Grain fade-out scheduled: target=0 frames=\(frames) gen=\(newGen)")
+    }
+
+    // MARK: - Mute（Task 20）
+
+    /// Mute 状態を設定する。詳細は `DroneGenerator.setMuted(_:)` 参照。
+    func setMuted(_ muted: Bool) {
+        renderState.mutedFlag.store(muted ? 1 : 0, ordering: .relaxed)
+        logger.info("Grain mute set: \(muted ? "MUTED" : "UNMUTED", privacy: .public)")
+    }
+
+    /// 現在の mute 意図（UI 表示用）。
+    var isMuted: Bool {
+        renderState.mutedFlag.load(ordering: .relaxed) != 0
     }
 
     // MARK: - 状態参照

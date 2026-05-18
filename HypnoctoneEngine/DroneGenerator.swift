@@ -209,6 +209,19 @@ final class DroneGenerator {
                 envelopeMultiplier = 1.0
             }
 
+            // ---- ブロック先頭で mute flag を読む（Task 20） ----
+            //
+            // メインスレッドから `mutedFlag` を 0/1 で切り替える。即時切替するとクリックノイズが
+            // 出るので、補間ループ内で per-sample に `currentMuteMultiplier` を target に向けて
+            // `muteRampStepPerFrame` ずつ近づける（10ms ramp、44.1kHz で約 441 sample）。
+            // この multiplier は fade 系とは独立しており、出力 = generator × fade_amp × mute_mult
+            // で合成される。stop fade-out 中の mute toggle、mute 中の start fade-in も正しく動く。
+            // ramp 中の方向転換（mute→unmute→mute 等）も自然に対応: target が変わっても
+            // 現在値からそのまま新 target に向かう。
+            let isMutedNow = state.mutedFlag.load(ordering: .relaxed) != 0
+            let muteTarget: Float = isMutedNow ? 0.0 : 1.0
+            let muteStep = state.muteRampStepPerFrame
+
             // ---- 補間ループ（active 状態を audio thread が単一所有） ----
             //
             // 基準 phaseIncrement (L/R) を glide で target に向けて per-sample 線形補間する。
@@ -234,6 +247,9 @@ final class DroneGenerator {
 
             // 倍音数（ブロック内で配列の count が変わらないことを利用）。
             let harmonicsCount = state.harmonics.count
+
+            // Mute multiplier の現在値をローカルに取り出す（補間ループで per-sample 更新）。
+            var muteMultiplier = state.currentMuteMultiplier
 
             for frame in 0..<Int(frameCount) {
                 // フェード残りがあれば 1 サンプル分だけ target に近づける。
@@ -287,10 +303,20 @@ final class DroneGenerator {
                     state.harmonics[i] = h
                 }
 
+                // Mute multiplier を target に向けて 1 サンプル分近づける（Task 20）。
+                // ramp 中の方向転換にも自然に対応するため、ループ内で毎サンプル target との
+                // 大小関係を見て step ずつ進める。
+                if muteMultiplier < muteTarget {
+                    muteMultiplier = min(muteMultiplier + muteStep, muteTarget)
+                } else if muteMultiplier > muteTarget {
+                    muteMultiplier = max(muteMultiplier - muteStep, muteTarget)
+                }
+
                 // Envelope multiplier をブロック単位で全出力に乗算（呼吸感）。
                 // ブロック単位で十分（envelope は超低周波で 5.8ms 内の変化は無視できる）。
-                let outL = sampleL * envelopeMultiplier
-                let outR = sampleR * envelopeMultiplier
+                // Mute multiplier は per-sample で適用（10ms ramp は ブロック粒度では粗すぎ）。
+                let outL = sampleL * envelopeMultiplier * muteMultiplier
+                let outR = sampleR * envelopeMultiplier * muteMultiplier
 
                 if isStereo {
                     bufferL[frame] = outL
@@ -323,6 +349,7 @@ final class DroneGenerator {
             state.activeFadeFramesRemaining = framesRemaining
             state.lfoPhase = lfoPhase
             state.envelopePhase = envelopePhase
+            state.currentMuteMultiplier = muteMultiplier
             return noErr
         }
     }
@@ -402,6 +429,23 @@ final class DroneGenerator {
         // 3) writer 完了マーク (even)
         let newGen = renderState.pendingPitchGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
         logger.info("Drone pitch set: \(frequency, privacy: .public)Hz glide=\(glideSeconds, privacy: .public)s gen=\(newGen)")
+    }
+
+    // MARK: - Mute（Task 20）
+
+    /// Mute 状態を設定する。audio thread が 10ms ramp で 0/1 に向けて補間するため、
+    /// 切替時のクリックノイズは出ない。fade scheduler とは独立しているので、
+    /// stop fade-out 中の mute toggle や、mute 中の start fade-in も安全に動く。
+    /// - Parameter muted: true で音を 0 に、false で 1.0 に向ける。
+    func setMuted(_ muted: Bool) {
+        renderState.mutedFlag.store(muted ? 1 : 0, ordering: .relaxed)
+        logger.info("Drone mute set: \(muted ? "MUTED" : "UNMUTED", privacy: .public)")
+    }
+
+    /// 現在の mute 意図（最新の `setMuted` が指示した値）。
+    /// audio thread の ramp 進行とは独立に「ユーザー意図」を表す（UI 表示用）。
+    var isMuted: Bool {
+        renderState.mutedFlag.load(ordering: .relaxed) != 0
     }
 
     // MARK: - 状態参照

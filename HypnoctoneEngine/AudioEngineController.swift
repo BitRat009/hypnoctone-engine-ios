@@ -67,6 +67,55 @@ final class AudioEngineController: ObservableObject {
         case offlineToWAV
     }
 
+    /// VoiceGroup → mute 対応 generator を統一的に扱うための薄いラッパー。
+    /// DroneGenerator と GrainGenerator は protocol を共有していないため、
+    /// 関連値で 1 段抽象化する（NoiseGenerator は voice group に紐付かないため含めない）。
+    private enum VoiceMutable {
+        case drone(DroneGenerator)
+        case grain(GrainGenerator)
+
+        func setMuted(_ muted: Bool) {
+            switch self {
+            case .drone(let g): g.setMuted(muted)
+            case .grain(let g): g.setMuted(muted)
+            }
+        }
+
+        var isMuted: Bool {
+            switch self {
+            case .drone(let g): return g.isMuted
+            case .grain(let g): return g.isMuted
+            }
+        }
+    }
+
+    // MARK: - Voice グループ (Task 20)
+
+    /// ATMÓS 風の 4 voice グループ。UI から各グループを mute / unmute するための識別子。
+    /// 内部の generator マッピングは:
+    ///   - `.tone`: droneGenerators[2] (E4) + droneGenerators[3] (octave A4) を統合した中高域メロディ位置
+    ///   - `.drone`: droneGenerators[1] (root A3) の持続音
+    ///   - `.sub`: droneGenerators[0] (sub bass A1) の重低音
+    ///   - `.grain`: grainGenerator の高音域 shimmer
+    /// Noise は ATMÓS UI に対応する voice グループが無いため背景レイヤーとして
+    /// 常時 ON 扱い（UI 上の mute 対象外）。
+    enum VoiceGroup: String, CaseIterable {
+        case tone
+        case drone
+        case sub
+        case grain
+
+        /// UI 表示用の短いラベル（ATMÓS と同じ大文字表記）。
+        var label: String {
+            switch self {
+            case .tone:  return "TONE"
+            case .drone: return "DRONE"
+            case .sub:   return "SUB"
+            case .grain: return "GRAIN"
+            }
+        }
+    }
+
     // MARK: - 公開状態
 
     /// エンジンが動作中かどうか。
@@ -481,6 +530,71 @@ final class AudioEngineController: ObservableObject {
     func setVolume(_ value: Float) {
         let clamped = min(max(value, 0.0), 1.0)
         engine.mainMixerNode.outputVolume = clamped
+    }
+
+    // MARK: - Voice mute (Task 20)
+
+    /// 指定 voice グループの mute 状態を設定する。10ms ramp で 0/1 に補間されるため
+    /// 切替時のクリックノイズは出ない。stop fade-out 中・start fade-in 中の操作も安全。
+    ///
+    /// `.tone` は 2 つの DroneGenerator (E4+A4) に for ループで順次 setMuted する。
+    /// 理論上「片方が先に flag store → audio block が割り込んで片方だけ ramp 開始」の
+    /// 1 buffer (~5.8ms @ 256 frames) ずれが発生し得るが、メインスレッドの 2 回連続 atomic store は
+    /// ns オーダーで、audio block 間隔 (5.8ms) を跨ぐ確率は実用上ゼロ。
+    /// 厳密に同一 sample で揃えたい場合は将来 group-shared atomic flag に refactor する余地あり。
+    /// - Parameters:
+    ///   - group: 対象 voice グループ。
+    ///   - muted: true で音を 0 に、false で 1.0 に向ける。
+    func setMuted(_ group: VoiceGroup, _ muted: Bool) {
+        for gen in generators(for: group) {
+            gen.setMuted(muted)
+        }
+    }
+
+    /// 指定 voice グループの現在の mute 意図を返す（UI 表示用）。
+    /// グループに複数 generator が紐付く場合は、いずれかが muted なら true（UI の整合性のため）。
+    func isMuted(_ group: VoiceGroup) -> Bool {
+        let gens = generators(for: group)
+        guard !gens.isEmpty else { return false }
+        return gens.contains(where: { $0.isMuted })
+    }
+
+    /// 指定 voice グループに紐付く DroneGenerator 群を返す（mute API の内部実装用）。
+    /// `.grain` は DroneGenerator ではないため空配列を返し、`mutableGenerators(for:)` 経由で扱う。
+    private func droneGenerators(for group: VoiceGroup) -> [DroneGenerator] {
+        // droneGenerators 配列のインデックス対応: [0]=sub / [1]=root / [2]=5th / [3]=octave
+        // sub と octave を MIDI 範囲制約で守っているので、precondition と整合する境界を維持。
+        switch group {
+        case .sub:   return [droneGenerators[0]]
+        case .drone: return [droneGenerators[1]]
+        case .tone:  return [droneGenerators[2], droneGenerators[3]]  // E4 + octave A4 を統合
+        case .grain: return []
+        }
+    }
+
+    /// VoiceGroup に紐付く mute 対応 generator 群（DroneGenerator + GrainGenerator）を統一的に扱う。
+    /// 戻り値は `setMuted` / `isMuted` を持つプロトコル準拠オブジェクト相当のクロージャ呼び出し用に
+    /// `(setMuted: (Bool) -> Void, isMuted: () -> Bool)` をまとめた構造体配列にしても良いが、
+    /// シンプルに「VoiceGroup → mute 適用」を 1 メソッドで畳むため、内部で個別 generator を呼ぶ。
+    private func generators(for group: VoiceGroup) -> [VoiceMutable] {
+        switch group {
+        case .sub, .drone, .tone:
+            return droneGenerators(for: group).map { VoiceMutable.drone($0) }
+        case .grain:
+            return [VoiceMutable.grain(grainGenerator)]
+        }
+    }
+
+    /// 指定 voice グループの代表 note 名（UI 表示用）。
+    /// `.tone` は E4 + A4 統合のため `"E4·A4"` 形式で返す。`.grain` は trigger 時に random 選択
+    /// なので候補リストの代表表記 `"C#5/E5/F#5/A5"` を返す。
+    func displayNoteName(for group: VoiceGroup) -> String {
+        switch group {
+        case .sub:   return currentDroneNotes[0].name
+        case .drone: return currentDroneNotes[1].name
+        case .tone:  return "\(currentDroneNotes[2].name)·\(currentDroneNotes[3].name)"
+        case .grain: return "C#5/E5/F#5/A5"
+        }
     }
 
     // MARK: - realtime 起動

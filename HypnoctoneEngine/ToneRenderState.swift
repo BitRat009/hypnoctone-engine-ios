@@ -233,6 +233,31 @@ final class ToneRenderState {
     /// 同じパターン: writer は .acquiringAndReleasing で odd → payload store → .releasing で even。
     let pendingPitchGeneration = ManagedAtomic<Int>(0)
 
+    // MARK: - Main writer / Audio reader（mute, Task 20）
+
+    /// Mute state。0 = unmuted (multiplier target 1.0) / 1 = muted (multiplier target 0.0)。
+    /// メインスレッドの `setMuted(_:)` が relaxed store、audio thread が relaxed load する。
+    /// fade コマンドとは独立した別レイヤー（出力 = generator_sample × fade_amp × mute_multiplier）で、
+    /// stop fade-out 中の mute toggle や、mute 中の全体 fade-in も正しく合成される。
+    /// 即時切替するとクリックノイズが出るので、render block 内で固定 step の per-sample 補間で
+    /// `currentMuteMultiplier` を target に向ける（ramp 約 10ms）。
+    let mutedFlag = ManagedAtomic<UInt8>(0)
+
+    // MARK: - Audio thread 単一所有 — mute multiplier
+
+    /// 現在の mute multiplier（補間後の値、0.0〜1.0）。
+    /// render block が `mutedFlag` を観測し、target = (flag==0) ? 1.0 : 0.0 に向けて
+    /// 1 サンプルあたり `muteRampStepPerFrame` だけ近づける。
+    /// ramp 中の方向転換（mute → ramp 中 → unmute）も自然に対応（target が変わっても
+    /// 現在値からそのまま新 target に向かう）。
+    var currentMuteMultiplier: Float = 1.0
+
+    // MARK: - 定数
+
+    /// 1 サンプルあたりの mute ramp step（0〜1 範囲を `muteRampFrames` 分割）。
+    /// `1.0 / (muteRampSeconds × sampleRate)`。10ms ramp で 44.1kHz なら 1/441 ≈ 0.00227。
+    let muteRampStepPerFrame: Float
+
     // MARK: - 初期化
 
     /// - Parameters:
@@ -319,5 +344,9 @@ final class ToneRenderState {
             self.envelopePhaseIncrement = 0.0
         }
         self.envelopePhase = envelopeInitialPhase
+
+        // Mute ramp 10ms: クリックノイズ回避できる最短時間（ASR の attack 系プラグインも同水準）。
+        // 44.1kHz なら 441 sample で 0→1 / 1→0 を補間 → step = 1/441 ≈ 0.00227 / sample。
+        self.muteRampStepPerFrame = Float(1.0 / (0.010 * sampleRate))
     }
 }
