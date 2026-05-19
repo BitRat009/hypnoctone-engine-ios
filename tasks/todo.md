@@ -1245,7 +1245,13 @@ beat (θ-α 境界) を複合した「単音より聞いていられる」低周
         即時周波数反映、次 Start で fade-in 開始の挙動に
       - Low 反映 (コメント): Modes.swift と MainView.swift の「5 mode」表記を 6 mode に更新、
         「100Hz 帯の純音刺激」→「100Hz 帯の低音レイヤー」で中立化
-- [ ] Phase 7: push → CI → artifacts で確認 (build success / 6 mode grid 表示 / layout 維持 /
-      SUB voice の表示が GROUNDING で "G2" になるか)
+- [x] Phase 7: push (7343f6d) → CI → artifacts_040 で確認
+      - build success / crash なし / WAV 3,195,680 bytes (audio path 副作用ゼロ)
+      - **6 mode grid が綺麗に 2 行ピッタリ表示**: 上段 SLEEP/FOCUS/MEDITATE、
+        下段 RELAX/BINAURAL/GROUNDING (空マスなし、Task 30 の下段右空白解消)
+      - "Hypnoctone" タイトルの status bar 被り regression は再発なし
+      - SUB voice の "G2" 表示は CI で GROUNDING に切替されない (SLEEP 起動) ため
+        実機 Phase 8 で確認に送る
 - [ ] Phase 8 (後続課題, Developer Program 加入後): 実機で GROUNDING の聴感確認、
-      G2(~98Hz) と 6Hz binaural の複合効果を聴感で確認
+      G2(~98Hz) と 6Hz binaural の複合効果を聴感で確認、SUB voice の UI 表示が
+      "G2" に切り替わることを確認
