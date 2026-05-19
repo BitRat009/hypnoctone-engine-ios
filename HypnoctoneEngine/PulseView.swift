@@ -15,6 +15,10 @@ struct PulseView: View {
     /// 拡大状態。アニメーションのトグルに使う。
     @State private var expanded = false
 
+    /// Reduce Motion 設定 (Task 29)。`true` なら脈動アニメーションを無効化し、
+    /// 静的な「最終到達状態」だけ表示する (動きに弱いユーザー配慮)。
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         ZStack {
             // 外側の淡いハロー。
@@ -46,7 +50,10 @@ struct PulseView: View {
     }
 
     /// 再生中はゆっくり往復し続け、停止中は静かに収束するアニメーション。
-    private var pulseAnimation: Animation {
+    /// Task 29: Reduce Motion 設定時は `nil` を返してアニメーションを完全に無効化
+    /// (expanded の遷移は即時適用される)。
+    private var pulseAnimation: Animation? {
+        if reduceMotion { return nil }
         if isActive {
             return .easeInOut(duration: period / 2).repeatForever(autoreverses: true)
         } else {

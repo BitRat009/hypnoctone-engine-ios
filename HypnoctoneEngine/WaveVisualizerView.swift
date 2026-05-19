@@ -48,6 +48,10 @@ struct WaveVisualizerView: View {
     /// Pause 直前の経過秒。Resume 時に startDate に戻して使う。
     @State private var pausedElapsed: TimeInterval = 0
 
+    /// Reduce Motion 設定 (Task 29)。`true` なら TimelineView を使わず常に静的 Canvas
+    /// に切り替え、波形を `pausedElapsed` で固定描画する。
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// 4 voice 分の wave 静的パラメータを `VoiceGroup` キーでペア化。
     /// 配列順序依存を排除するため、明示的に group とペアで保持する。
     private static let waveParamsByGroup: [(group: AudioEngineController.VoiceGroup, params: WaveParams)] = [
@@ -63,8 +67,8 @@ struct WaveVisualizerView: View {
 
     var body: some View {
         Group {
-            if isPlaying {
-                // 再生中: TimelineView で 60fps 駆動。
+            if isPlaying && !reduceMotion {
+                // 再生中 (Reduce Motion 無効時): TimelineView で 60fps 駆動。
                 TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
                     Canvas { context, size in
                         let elapsed = timeline.date.timeIntervalSince(startDate)
@@ -72,8 +76,9 @@ struct WaveVisualizerView: View {
                     }
                 }
             } else {
-                // 停止中: 静的 Canvas (描画スケジュール停止)。
+                // 停止中 / Reduce Motion 有効時: 静的 Canvas (描画スケジュール停止)。
                 // pausedElapsed の位相で freeze するので Pause 直前の波形がそのまま残る。
+                // Reduce Motion 時は再生中でも常に同じ位相で静止 (動きに弱いユーザー配慮)。
                 Canvas { context, size in
                     renderWaves(context: context, size: size, t: pausedElapsed)
                 }
@@ -81,6 +86,10 @@ struct WaveVisualizerView: View {
         }
         .onChange(of: isPlaying) { playing in
             // iOS 16 互換のため `oldValue, newValue` 形式ではなく単引数版を使う。
+            // Task 29: Reduce Motion 有効時は pausedElapsed を更新しない。
+            // そのまま動かしてしまうと「再生中は静止なのに Stop の瞬間だけ別位相にジャンプ」
+            // という挙動になるため (Codex Task 29 Medium 反映)。
+            if reduceMotion { return }
             if playing {
                 // Resume: 過去にずらした基準時刻にすることで、Pause 中も
                 // 時間が流れていたかのように位相が継続する。

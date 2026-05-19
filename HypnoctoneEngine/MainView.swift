@@ -5,6 +5,13 @@ import SwiftUI
 /// 「音より前に出ない」ことを重視し、情報量と刺激を抑えた暗いレイアウトにする。
 /// UI は状態を表示し操作を受け付けるだけで、音響処理は `AudioViewModel` 経由で
 /// `AudioEngineController` に委譲する。
+///
+/// ## アクセシビリティ (Task 29)
+/// - フォントは `.font(.system(.body, design: .rounded).weight(...))` のように
+///   semantic スタイルで指定し、Dynamic Type に追従する (拡大上限 `xxLarge` で
+///   レイアウト崩壊を防ぐ)。
+/// - 各操作要素に `accessibilityLabel` / `accessibilityValue` / `accessibilityHint` を付与。
+/// - 装飾用ビュー (WaveVisualizer / PulseView) は VoiceOver から隠す。
 struct MainView: View {
     @StateObject private var viewModel = AudioViewModel()
 
@@ -29,6 +36,11 @@ struct MainView: View {
             .padding(.vertical, 40)
         }
         .preferredColorScheme(.dark)
+        // Dynamic Type は xxLarge までを許容。XL/XXL 以上は文字が大きくなりすぎて
+        // 4 mode ボタンや 6 timer preset ボタンの横並びが崩れるため上限を設ける。
+        // accessibility 設定 (Accessibility Large) 群はサポートしない (Sleep アプリの
+        // 限られた画面構成では full accessibility text size は現実的でない)。
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
         .onAppear(perform: handleCIAutostart)
     }
 
@@ -51,6 +63,9 @@ struct MainView: View {
     /// アプリアイコン (wave-plus) と同じモチーフの動的波形 (WaveVisualizerView) を
     /// 全幅で背景に敷き、その上に既存の PulseView (中央発光ハロー + コア) を重ねる。
     /// 240pt 高さで縦方向を固定し、上下 Spacer で中央配置する。
+    ///
+    /// Task 29: 装飾要素なので `.accessibilityHidden(true)` で VoiceOver から隠す
+    /// (再生状態は statusText で別途読み上げる)。
     private var visualizer: some View {
         ZStack {
             WaveVisualizerView(
@@ -61,6 +76,7 @@ struct MainView: View {
             PulseView(isActive: viewModel.isPlaying)
         }
         .frame(height: 240)
+        .accessibilityHidden(true)
     }
 
     /// `viewModel.voiceGroups` を `[VoiceGroup: Bool]` 辞書に変換した MUTE 状態。
@@ -72,23 +88,28 @@ struct MainView: View {
 
     /// アプリ名と現在モード名。Task 22 で subtitle を `viewModel.currentModeLabel` 動的化
     /// ("Sleep Mode" / "Focus Mode" / "Meditate Mode" / "Relax Mode")。
+    /// Task 29: 元 30pt/14pt 固定 → `.title.weight(.light)` / `.subheadline` で Dynamic Type 対応。
     private var header: some View {
         VStack(spacing: 6) {
             Text("Hypnoctone")
-                .font(.system(size: 30, weight: .light, design: .rounded))
+                .font(.system(.title, design: .rounded).weight(.light))
                 .foregroundColor(Theme.primaryText)
             Text(viewModel.currentModeLabel)
-                .font(.system(size: 14, weight: .regular, design: .rounded))
+                .font(.system(.subheadline, design: .rounded))
                 .tracking(2)
                 .foregroundColor(Theme.secondaryText)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Hypnoctone, \(viewModel.currentModeLabel)")
     }
 
-    /// 再生状態テキスト。
+    /// 再生状態テキスト。Task 29: 元 15pt 固定 → `.callout` で Dynamic Type 対応 +
+    /// VoiceOver に "Playback playing" / "Playback stopped" と明示。
     private var statusText: some View {
         Text(viewModel.statusText)
-            .font(.system(size: 15, weight: .regular, design: .rounded))
+            .font(.system(.callout, design: .rounded))
             .foregroundColor(Theme.secondaryText)
+            .accessibilityLabel(viewModel.isPlaying ? "Playback playing" : "Playback stopped")
     }
 
     /// 4 モード切替セレクタ (Task 22, ATMÓS 風 SLEEP/FOCUS/MEDITATE/RELAX)。
@@ -108,15 +129,16 @@ struct MainView: View {
             HStack {
                 if !viewModel.canChangeMode {
                     Text("Stop playback to change mode")
-                        .font(.system(size: 10, weight: .regular, design: .rounded))
+                        .font(.system(.caption2, design: .rounded))
                         .foregroundColor(Theme.secondaryText)
                         .opacity(0.7)
                 }
                 Spacer()
                 Text("BPM \(viewModel.bpm)")
-                    .font(.system(size: 10, weight: .regular, design: .rounded))
+                    .font(.system(.caption2, design: .rounded))
                     .tracking(1)
                     .foregroundColor(Theme.secondaryText)
+                    .accessibilityLabel("Beats per minute \(viewModel.bpm)")
             }
             .padding(.horizontal, 2)
         }
@@ -130,6 +152,7 @@ struct MainView: View {
     /// 縮小も許容 (Codex Task 22 High/Low 指摘反映)。
     /// アクセシビリティ: 現在モードに `.accessibilityValue("Current mode")`、
     /// disabled に `.accessibilityHint("Stop playback to change mode")` で VoiceOver 補足。
+    /// Task 29: font を `.caption2.weight(.medium)` で Dynamic Type 対応。
     private func modeButton(mode: Mode) -> some View {
         let isCurrent = (viewModel.currentMode == mode)
         let canChange = viewModel.canChangeMode
@@ -138,7 +161,7 @@ struct MainView: View {
             viewModel.setMode(mode)
         } label: {
             Text(mode.label)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .font(.system(.caption2, design: .rounded).weight(.medium))
                 .tracking(1)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -171,9 +194,10 @@ struct MainView: View {
     private var musicInfo: some View {
         VStack(spacing: 12) {
             Text("Scale \(viewModel.rootNoteName) \(viewModel.scaleName)")
-                .font(.system(size: 12, weight: .regular, design: .rounded))
+                .font(.system(.caption, design: .rounded))
                 .tracking(1)
                 .foregroundColor(Theme.secondaryText)
+                .accessibilityLabel("Scale \(viewModel.rootNoteName) \(viewModel.scaleName)")
             voiceGrid
         }
     }
@@ -192,21 +216,30 @@ struct MainView: View {
 
     /// 1 voice 分のセル: ラベル / Note 名 / MUTE ボタン。
     /// MUTE 状態のとき: ボタンを点灯色、Note 名を半透明化して視覚的に「停止中」と分かるように。
+    ///
+    /// Task 29: voice ラベルと note 名を 1 つの accessibility element として読み上げる
+    /// (例: "TONE voice, E4 and A4, playing")。MUTE ボタンは別個に label + value + hint。
+    /// note 名の "·" / "/" 区切りは VoiceOver が読みづらいので "and" に置換する。
     private func voiceCell(label: String, noteName: String, isMuted: Bool, onMuteTap: @escaping () -> Void) -> some View {
         VStack(spacing: 6) {
-            Text(label)
-                .font(.system(size: 10, weight: .regular, design: .rounded))
-                .tracking(1.5)
-                .foregroundColor(Theme.secondaryText)
-            Text(noteName)
-                .font(.system(size: 13, weight: .light, design: .rounded))
-                .foregroundColor(isMuted ? Theme.secondaryText : Theme.primaryText)
-                .opacity(isMuted ? 0.4 : 1.0)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
+            VStack(spacing: 6) {
+                Text(label)
+                    .font(.system(.caption2, design: .rounded))
+                    .tracking(1.5)
+                    .foregroundColor(Theme.secondaryText)
+                Text(noteName)
+                    .font(.system(.footnote, design: .rounded).weight(.light))
+                    .foregroundColor(isMuted ? Theme.secondaryText : Theme.primaryText)
+                    .opacity(isMuted ? 0.4 : 1.0)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label) voice, \(spokenNoteName(noteName)), \(isMuted ? "muted" : "playing")")
+
             Button(action: onMuteTap) {
                 Text("MUTE")
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .font(.system(.caption2, design: .rounded).weight(.medium))
                     .tracking(1)
                     .foregroundColor(isMuted ? Theme.accent : Theme.secondaryText)
                     .frame(maxWidth: .infinity)
@@ -221,17 +254,29 @@ struct MainView: View {
                     )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(label) mute")
+            .accessibilityValue(isMuted ? "On" : "Off")
+            .accessibilityHint("Toggle \(label) voice mute")
         }
         .frame(maxWidth: .infinity)
     }
 
-    /// Start / Stop ボタン。
+    /// "E4·A4" や "C#5/E5/F#5/A5" のような note 名表記を VoiceOver 用に変換する。
+    /// "·" / "/" 区切りは VoiceOver では読み上げが不自然なため "and" で置換。
+    private func spokenNoteName(_ noteName: String) -> String {
+        return noteName
+            .replacingOccurrences(of: "·", with: " and ")
+            .replacingOccurrences(of: "/", with: " and ")
+    }
+
+    /// Start / Stop ボタン。Task 29: font を `.body.weight(.medium)` で Dynamic Type 対応 +
+    /// VoiceOver に意図を伝える label/hint を追加。
     private var transportButton: some View {
         Button {
             viewModel.toggle()
         } label: {
             Text(viewModel.isPlaying ? "Stop" : "Start")
-                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .font(.system(.body, design: .rounded).weight(.medium))
                 .foregroundColor(Theme.primaryText)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
@@ -245,19 +290,27 @@ struct MainView: View {
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(viewModel.isPlaying ? "Stop" : "Start")
+        .accessibilityHint(viewModel.isPlaying ? "Stops the ambient audio" : "Starts the ambient audio")
     }
 
     /// Volume スライダー。
+    /// Task 29: Slider に `.accessibilityValue("Volume \(percent)%")` で VoiceOver に
+    /// 現在値を percentage で announce。
     private var volumeControl: some View {
         VStack(spacing: 8) {
             HStack {
                 Text("Volume")
-                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .font(.system(.footnote, design: .rounded))
                     .foregroundColor(Theme.secondaryText)
                 Spacer()
             }
             Slider(value: $viewModel.volume, in: 0.0...1.0)
                 .tint(Theme.accent)
+                .accessibilityLabel("Volume")
+                // 丸めは `Int(...)` 切り捨てではなく `.rounded()` で表示と操作感を揃える
+                // (Codex Task 29 Low 反映)。
+                .accessibilityValue("\(Int((viewModel.volume * 100).rounded())) percent")
         }
     }
 
@@ -283,7 +336,7 @@ struct MainView: View {
     /// この view は呼ばれない (timerLabel が presetButtons 側を表示)。
     private var timerCountdownView: some View {
         Text("Sleep Timer · \(viewModel.sleepTimerRemainingText)")
-            .font(.system(size: 12, weight: .regular, design: .rounded))
+            .font(.system(.caption, design: .rounded))
             .tracking(1)
             .foregroundColor(Theme.primaryText)
             .accessibilityLabel("Sleep Timer remaining \(viewModel.sleepTimerRemainingText)")
@@ -294,7 +347,7 @@ struct MainView: View {
     private var timerPresetButtons: some View {
         HStack(spacing: 6) {
             Text("Timer")
-                .font(.system(size: 10, weight: .regular, design: .rounded))
+                .font(.system(.caption2, design: .rounded))
                 .tracking(1)
                 .foregroundColor(Theme.secondaryText)
             ForEach(viewModel.sleepTimerPresetMinutes, id: \.self) { mins in
@@ -319,7 +372,7 @@ struct MainView: View {
             viewModel.setSleepTimer(minutes: minutes)
         } label: {
             Text(label)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .font(.system(.caption2, design: .rounded).weight(.medium))
                 .tracking(0.5)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)

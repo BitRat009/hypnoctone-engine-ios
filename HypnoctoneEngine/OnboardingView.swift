@@ -70,11 +70,14 @@ struct OnboardingView: View {
             }
         }
         .preferredColorScheme(.dark)
+        // Task 29: Dynamic Type は xxLarge までを許容 (MainView と揃える)。
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
     }
 
     // MARK: - 構成要素
 
     /// 右上 Skip ボタンを含むトップバー。
+    /// Task 29: font を `.subheadline` で Dynamic Type 対応。
     private var skipBar: some View {
         HStack {
             Spacer()
@@ -82,7 +85,7 @@ struct OnboardingView: View {
                 onComplete()
             } label: {
                 Text("Skip")
-                    .font(.system(size: 14, weight: .regular, design: .rounded))
+                    .font(.system(.subheadline, design: .rounded))
                     .foregroundColor(Theme.secondaryText)
             }
             .buttonStyle(.plain)
@@ -107,13 +110,14 @@ struct OnboardingView: View {
                 .accessibilityHidden(true)
 
             VStack(spacing: 12) {
+                // Task 29: title/subtitle/body も semantic font で Dynamic Type 対応。
                 Text(page.title)
-                    .font(.system(size: 30, weight: .light, design: .rounded))
+                    .font(.system(.title, design: .rounded).weight(.light))
                     .foregroundColor(Theme.primaryText)
                     .multilineTextAlignment(.center)
 
                 Text(page.subtitle)
-                    .font(.system(size: 14, weight: .regular, design: .rounded))
+                    .font(.system(.subheadline, design: .rounded))
                     .tracking(2)
                     .foregroundColor(Theme.secondaryText)
                     .multilineTextAlignment(.center)
@@ -122,7 +126,7 @@ struct OnboardingView: View {
             // 本文は ScrollView で包む。小画面 / Dynamic Type 大でレイアウト崩れ防止。
             ScrollView(showsIndicators: false) {
                 Text(page.body)
-                    .font(.system(size: 15, weight: .regular, design: .rounded))
+                    .font(.system(.callout, design: .rounded))
                     .foregroundColor(Theme.primaryText.opacity(0.85))
                     .multilineTextAlignment(.center)
                     .lineSpacing(4)
@@ -147,7 +151,7 @@ struct OnboardingView: View {
             }
         } label: {
             Text(isLast ? "Get Started" : "Next")
-                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .font(.system(.body, design: .rounded).weight(.medium))
                 .foregroundColor(Theme.primaryText)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
