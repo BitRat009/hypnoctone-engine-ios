@@ -89,16 +89,56 @@ workflows:
           echo "Installing: $APP_PATH"
           xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
 
-          # Task 24: 生成された Info.plist の確認。UIBackgroundModes 配列に "audio" が
-          # 入っていることを目視確認できるようにログ出力する。
-          # Xcode 16 の auto plist 生成で INFOPLIST_KEY_UIBackgroundModes = audio が
-          # 配列化されているはず。
+          # Task 24/25: 生成された Info.plist の fail-loud 確認。
+          #   Task 24: UIBackgroundModes 配列に "audio" が入っていること
+          #   Task 25: CFBundleIconName = AppIcon、UILaunchScreen.UIColorName = LaunchBackground
+          # Xcode 16 の auto plist 生成で各 INFOPLIST_KEY_* が反映されているはず。
+          # plutil -extract で値を取得し、想定値と異なれば build を落とす。
           INFO_PLIST="$APP_PATH/Info.plist"
-          if [ -f "$INFO_PLIST" ]; then
-            echo "--- Generated Info.plist (UIBackgroundModes 等を確認) ---"
-            plutil -p "$INFO_PLIST" | grep -A 3 -E "UIBackgroundModes|CFBundleIdentifier" || true
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "FAIL: Info.plist が見つかりません: $INFO_PLIST"
+            exit 1
+          fi
+
+          echo "--- Generated Info.plist (Task 24/25 関連キーを目視確認) ---"
+          plutil -p "$INFO_PLIST" \
+            | grep -A 3 -E "UIBackgroundModes|CFBundleIdentifier|CFBundleIconName|UILaunchScreen" \
+            || true
+
+          # Task 25 fail-loud: CFBundleIconName / UILaunchScreen.UIColorName を厳密検証
+          # 注: actool 出力次第で AppIcon 名が top-level CFBundleIconName ではなく
+          # CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName 側に入る場合がある。
+          # 両方を見て、どちらかが "AppIcon" であれば OK とする (Codex review 反映)。
+          ICON_NAME="$(plutil -extract CFBundleIconName raw -o - "$INFO_PLIST" 2>/dev/null || true)"
+          if [ -z "$ICON_NAME" ]; then
+            ICON_NAME="$(plutil -extract CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName raw -o - "$INFO_PLIST" 2>/dev/null || true)"
+          fi
+          if [ "$ICON_NAME" != "AppIcon" ]; then
+            echo "FAIL: CFBundleIconName='$ICON_NAME' (expected 'AppIcon')"
+            echo "  → ASSETCATALOG_COMPILER_APPICON_NAME が反映されていない可能性"
+            exit 1
+          fi
+          echo "OK: CFBundleIconName = AppIcon"
+
+          LS_COLOR="$(plutil -extract UILaunchScreen.UIColorName raw -o - "$INFO_PLIST" 2>/dev/null || true)"
+          if [ "$LS_COLOR" != "LaunchBackground" ]; then
+            echo "FAIL: UILaunchScreen.UIColorName='$LS_COLOR' (expected 'LaunchBackground')"
+            echo "  → INFOPLIST_KEY_UILaunchScreen_BackgroundColor が UIColorName へ展開されていない"
+            echo "  → 対処: 明示的な Info.plist を追加し UILaunchScreen dict を直書きする必要"
+            exit 1
+          fi
+          echo "OK: UILaunchScreen.UIColorName = LaunchBackground"
+
+          echo "--- App bundle 内のコンパイル済み Asset Catalog (Assets.car) 確認 ---"
+          if [ -f "$APP_PATH/Assets.car" ]; then
+            echo "Assets.car: $(stat -f %z "$APP_PATH/Assets.car") bytes"
+            # AppIcon が actool で展開され、各 size の png が bundle に直置きされる場合は
+            # それも一覧化（Xcode 16 の universal single-size 動作で生成される想定）
+            find "$APP_PATH" -maxdepth 1 -name 'AppIcon*' -print
           else
-            echo "WARNING: Info.plist が見つかりません: $INFO_PLIST"
+            echo "FAIL: Assets.car が見つかりません: $APP_PATH/Assets.car"
+            echo "  → Assets.xcassets が actool に拾われていない可能性"
+            exit 1
           fi
 
       - name: Capture video + screenshots + WAV (v3 offline render)

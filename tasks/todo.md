@@ -818,8 +818,62 @@ CI でビルド成功 + audio path 無変更 + Info.plist 確認まで実施。
       - Medium 2 (deinit Swift 6 strict) 据え置き: SWIFT_VERSION = 5.0 で警告なし、app lifetime singleton
       - Medium 3 (初期 publish) 据え置き: 実機 UX 確認後に判断
       - 2 回目: 最終 OK、Critical/High なし、Medium 残課題は将来の技術負債明示
-- [ ] Phase 5: push → CI → artifacts_029 で副作用なし確認
+- [x] Phase 5: push → CI → artifacts_029 で副作用なし確認
       - WAV: artifacts_028 と数値同値想定 (NowPlayingService は audio path に触らない)
       - codemagic.yaml に plutil -p で生成 Info.plist の UIBackgroundModes 確認 step 追加
       - build success + crash 無し + Info.plist に "audio" 配列要素確認
       - 実機での Background playback / Lock screen 操作確認は Developer Program 加入後
+      - artifacts_029 確認結果: build success、crash なし、NowPlayingService の Remote command 登録ログ確認、
+        MPNowPlayingInfoCenter に title=Hypnoctone / artist=Sleep Mode / playbackRate 0→1 遷移を syslog で確認、
+        SupportsBackgroundAudio タグ多数で AVAudioSession playback カテゴリ機能、offline render 正常完了
+
+## Task 25 — App Icon + Launch Screen
+
+Apple Developer Program 加入前のビジュアル整備。App Store / TestFlight 提出に必須となる
+App Icon (1024×1024 マスター) と暗背景 Launch Screen を整える。実機テストは不要 (CI で
+ビルド成功 + Info.plist 内 CFBundleIconName + UILaunchScreen 設定を確認できれば OK)。
+
+### 設計
+
+- **App Icon**: Hypnoctone のテーマ (Theme.background + Theme.accent) を反映した PulseView 風
+  デザイン (暗紺グラデ + 中央 radial 発光円)。文字は入れない (App 名は OS が表示)。
+  1024×1024 PNG 1 枚のみ用意 → Xcode 14+ の single-size AppIcon 機能で全 size 自動生成。
+- **Asset Catalog**: `HypnoctoneEngine/Assets.xcassets/` を新設し、`AppIcon.appiconset` と
+  Launch Screen 用 `LaunchBackground.colorset` を含める。
+- **Launch Screen**: 既存の `INFOPLIST_KEY_UILaunchScreen_Generation = YES` のまま
+  `INFOPLIST_KEY_UILaunchScreen_BackgroundColor = LaunchBackground` を追加して暗背景に。
+- **Icon 生成**: Python (Pillow + numpy) でローカル生成、PNG はリポジトリに commit。
+  再生成スクリプト `tools/generate_app_icon.py` を残してデザイン変更時の再現性を確保。
+
+### Phase
+
+- [x] Phase 1: `tools/generate_app_icon.py` を作成し 1024×1024 PNG を生成
+      - Theme.backgroundTop / backgroundBottom 縦グラデ + Theme.accent の halo + core
+      - 完全不透明 (Apple guideline) / 角丸なし (iOS 自動マスク)
+- [x] Phase 2: `HypnoctoneEngine/Assets.xcassets/` を作成
+      - root `Contents.json` (info only)
+      - `AppIcon.appiconset/Contents.json` (single-size 1024 universal, iOS 14+)
+      - `AppIcon.appiconset/icon-1024.png` (Phase 1 で生成)
+      - `LaunchBackground.colorset/Contents.json` (Theme.backgroundTop 相当の dark navy)
+- [x] Phase 3: pbxproj buildSettings を更新
+      - PBXFileSystemSynchronizedRootGroup なので folder 配下は自動認識、個別 PBXFileReference 追加不要
+      - Debug/Release 両方に ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon を追加
+      - Debug/Release 両方に INFOPLIST_KEY_UILaunchScreen_BackgroundColor = LaunchBackground を追加
+- [x] Phase 4: Codex クロスレビュー
+      - 1 回目: Critical なし、High 1 (UILaunchScreen.UIColorName 展開が公式 docs で確認できないと指摘) +
+        Medium 2 (CI 検証が grep -A 3 で loose / Assets.car の検出が緩い) + Low 2 (icon 小サイズ識別性 / colorset 形式)
+      - High + Medium 1 統合反映: codemagic.yaml の Info.plist 検証を `plutil -extract` ベースの fail-loud に書き換え。
+        CFBundleIconName != "AppIcon" / UILaunchScreen.UIColorName != "LaunchBackground" で `exit 1`、
+        前提が外れた場合は明示 Info.plist 直書きへ pivot するためのトリガとして CI で検出可能に
+      - Medium 2 反映: Assets.car 不在も `exit 1`、AppIcon 派生 PNG も `find` で列挙
+      - Low 1 据え置き: 実機 Home/Settings/Spotlight での縮小確認は Developer Program 加入後に実機で再評価
+      - Low 2 据え置き: Xcode 15+ generated colorset 互換の文字列形式で OK
+      - 2 回目: 追加 Low 指摘 (CFBundleIconName が nested CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName に
+        入る可能性) を反映、両方を見て fallback する形に変更。最終 OK
+- [x] Phase 5: codemagic.yaml に CFBundleIconName / UILaunchScreen / Assets.car 確認 step 追加
+- [ ] Phase 6: push → CI → artifacts_030 で確認
+      - build success / crash 無し
+      - Info.plist の CFBundleIconName = AppIcon、UILaunchScreen.UIColorName = LaunchBackground
+      - 01-after-render.png で Launch Screen→MainView 遷移後の暗背景描画 (副作用なし)
+      - WAV は artifacts_029 と同等 (Asset Catalog 追加は audio path に影響しない)
+- [ ] Phase 7 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認
