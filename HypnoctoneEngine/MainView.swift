@@ -120,14 +120,14 @@ struct MainView: View {
             .accessibilityLabel(viewModel.isPlaying ? "Playback playing" : "Playback stopped")
     }
 
-    /// 5 モード切替セレクタ (Task 22 で 4 mode 導入、Task 30 で BINAURAL 追加)。
+    /// モード切替セレクタ (Task 22 で 4 mode 導入、Task 30 で BINAURAL / Task 31 で GROUNDING 追加で計 6 mode)。
     /// - 現在モードは Theme.accent でハイライト、他モードはサブテキスト色
     /// - canChangeMode = false (再生中・fade-out 中) なら全ボタン無効化 + 補足メッセージ
     /// - Rhythm 表示 (preset.rhythmDisplay) を右側に小さく ("BPM N" or "N Hz")
     /// - 切替は Stop 状態のみ可能 (audio 層の Task 21 setMode が isRunning ガード)
     ///
-    /// Task 30: 5 mode を 3 列 LazyVGrid で配置 (上段 SLEEP/FOCUS/MEDITATE、下段 RELAX/BINAURAL/空)。
-    /// 5 mode 横並びは iPhone SE 幅 + Dynamic Type 大設定で潰れるため Grid 化 (Codex Task 30 Medium 反映)。
+    /// 6 mode を 3 列 LazyVGrid で 2 行ピッタリに配置 (上段 SLEEP/FOCUS/MEDITATE、
+    /// 下段 RELAX/BINAURAL/GROUNDING)。5 mode 時は下段右が空マスだったが Task 31 で埋まる。
     private var modeSelector: some View {
         VStack(spacing: 8) {
             LazyVGrid(columns: modeGridColumns, spacing: 6) {
@@ -167,7 +167,7 @@ struct MainView: View {
                 .font(.system(.caption2, design: .rounded))
                 .foregroundColor(Theme.secondaryText)
                 .opacity(0.7)
-        } else if viewModel.isBinauralMode {
+        } else if viewModel.isBinauralBeatMode {
             Text("Headphones recommended")
                 .font(.system(.caption2, design: .rounded))
                 .foregroundColor(Theme.secondaryText)
@@ -254,7 +254,7 @@ struct MainView: View {
     /// 現状は BINAURAL モード中の DRONE のみ「binaural beat を担う voice なので mute すると
     /// 効果が消える」旨を VoiceOver に伝える (Codex Task 30 Medium 反映で UX 注意喚起)。
     private func muteExtraHint(for group: AudioEngineController.VoiceGroup) -> String? {
-        if viewModel.isBinauralMode && group == .drone {
+        if viewModel.isBinauralBeatMode && group == .drone {
             return "DRONE carries the binaural beat. Muting it removes the beat."
         }
         return nil

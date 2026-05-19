@@ -142,11 +142,12 @@ struct WaveVisualizerView: View {
     /// 数値は初期値で、実機テスト後に Phase 7 で調整する想定。
     private func modeSpeedMultiplier() -> Double {
         switch mode {
-        case .sleep:    return 0.6   // BPM 30
-        case .focus:    return 1.0   // BPM 60
-        case .meditate: return 0.3   // BPM 6 (極ゆっくり)
-        case .relax:    return 0.8   // BPM 75
-        case .binaural: return 0.4   // 5 Hz beat (Task 30、静かな ambient、ゆっくりめ)
+        case .sleep:     return 0.6   // BPM 30
+        case .focus:     return 1.0   // BPM 60
+        case .meditate:  return 0.3   // BPM 6 (極ゆっくり)
+        case .relax:     return 0.8   // BPM 75
+        case .binaural:  return 0.4   // 5 Hz beat (Task 30、静かな ambient、ゆっくりめ)
+        case .grounding: return 0.35  // 6 Hz beat + 100Hz 帯純音 (Task 31、低周波重心、ゆっくりめ)
         }
     }
 

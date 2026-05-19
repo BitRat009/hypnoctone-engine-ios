@@ -206,11 +206,12 @@ final class AudioViewModel: ObservableObject {
     /// ここで生成する (UI 一貫性: header は タイトルケース、ボタンは大文字)。
     var currentModeLabel: String {
         switch controller.currentMode {
-        case .sleep:    return "Sleep Mode"
-        case .focus:    return "Focus Mode"
-        case .meditate: return "Meditate Mode"
-        case .relax:    return "Relax Mode"
-        case .binaural: return "Binaural Mode"
+        case .sleep:     return "Sleep Mode"
+        case .focus:     return "Focus Mode"
+        case .meditate:  return "Meditate Mode"
+        case .relax:     return "Relax Mode"
+        case .binaural:  return "Binaural Mode"
+        case .grounding: return "Grounding Mode"
         }
     }
 
@@ -224,8 +225,11 @@ final class AudioViewModel: ObservableObject {
     /// VoiceOver 用テキスト ("Beats per minute 30" / "5 hertz")。
     var rhythmDisplayAccessibilityText: String { rhythmDisplay.accessibilityText }
 
-    /// 現在モードが BINAURAL かどうか (UI hint 切替用)。
-    var isBinauralMode: Bool { controller.currentMode == .binaural }
+    /// 現在モードが binaural beat を含むかどうか (UI hint 切替用、Task 30 で BINAURAL、Task 31 で GROUNDING)。
+    /// Headphone 推奨注記 + DRONE MUTE の binaural 警告 hint をこのフラグで切り替える。
+    /// `preset.binauralBeatHz != nil` を実体ベースで判定するため、新たに binaural を含む mode が
+    /// 増えても preset 側に `binauralBeatHz` を設定すれば自動的に反映される。
+    var isBinauralBeatMode: Bool { controller.currentMode.preset.binauralBeatHz != nil }
 
     /// UI に表示する全モード一覧 (ボタングリッド用)。`Mode.allCases` を直接公開する。
     var allModes: [Mode] { Mode.allCases }

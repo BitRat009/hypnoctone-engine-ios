@@ -640,6 +640,20 @@ final class AudioEngineController: ObservableObject {
                 centerFreq: rootCenter
             )
         }
+
+        // Task 31: GROUNDING 対応。sub voice (droneGenerators[0]) の中央周波数を mode 別に override。
+        // - `subBassFrequencyHz` が nil (既存 5 mode): currentDroneNotes[0].frequency (A1=55Hz default) に戻す
+        // - non-nil (GROUNDING): 指定 Hz (G2≒98Hz) に setFrequency で即時切替
+        // setFrequency は内部で `.cents(renderState.detuneCents)` 経路を通るので、sub voice の
+        // L/R cent detune は維持される (sub には binauralBeatHz 適用しない設計、Task 31 では
+        // root voice のみ binaural、sub は純音重心)。
+        //
+        // glideSeconds: 0 で即時切替 (Codex Task 31 Medium 反映)。applyPreset は Stop 中のみ呼ばれる
+        // (isRunning ガード) ため、次の Start 時には新 preset の周波数で fade-in 開始する。3 秒 glide
+        // だと「Stop 中に切替したのに最初の 3 秒は前 mode の周波数が残る」UX 違和感が発生するため。
+        let subDefaultFreq = currentDroneNotes[0].frequency
+        let subTargetFreq = preset.subBassFrequencyHz ?? subDefaultFreq
+        droneGenerators[0].setFrequency(subTargetFreq, glideSeconds: 0)
     }
 
     // MARK: - Voice mute (Task 20)
@@ -687,7 +701,16 @@ final class AudioEngineController: ObservableObject {
     /// なので候補リストの代表表記 `"C#5/E5/F#5/A5"` を返す。
     func displayNoteName(for group: VoiceGroup) -> String {
         switch group {
-        case .sub:   return currentDroneNotes[0].name
+        case .sub:
+            // Task 31: GROUNDING で sub voice の周波数を A1 → G2 等に override する場合、
+            // UI 上も override 後の Note 名を表示する (Codex Task 31 Medium 反映で
+            // UI と実音のズレを解消)。12 * log2(hz/440) + 69 で MIDI 番号を逆算し
+            // Note(midiNumber:) で名前生成。
+            if let hz = currentMode.preset.subBassFrequencyHz {
+                let midiNumber = Int((12.0 * log2(hz / 440.0) + 69.0).rounded())
+                return Note(midiNumber: midiNumber).name
+            }
+            return currentDroneNotes[0].name
         case .drone: return currentDroneNotes[1].name
         case .tone:  return "\(currentDroneNotes[2].name)·\(currentDroneNotes[3].name)"
         case .grain: return "C#5/E5/F#5/A5"

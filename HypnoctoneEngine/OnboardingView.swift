@@ -34,9 +34,9 @@ struct OnboardingView: View {
             symbolName: "waveform"
         ),
         OnboardingPage(
-            title: "5 つのモード",
-            subtitle: "SLEEP / FOCUS / MEDITATE / RELAX / BINAURAL",
-            body: "5 つのモードはそれぞれ異なる音響プロファイル (低音強度・grain 頻度・reverb 深さ等) を持ちます。BINAURAL は L/R で 5 Hz 異なる周波数を出力する静かなステレオ音響です (ヘッドフォン推奨)。モード切替は Stop 状態でのみ可能です。",
+            title: "6 つのモード",
+            subtitle: "SLEEP / FOCUS / MEDITATE / RELAX / BINAURAL / GROUNDING",
+            body: "6 つのモードはそれぞれ異なる音響プロファイル (低音強度・grain 頻度・reverb 深さ等) を持ちます。BINAURAL は L/R で 5 Hz 異なる周波数を出力する静かなステレオ音響、GROUNDING は 100 Hz 帯の低周波純音と 6 Hz binaural を組み合わせた低周波重心の ambient です (どちらもヘッドフォン推奨)。モード切替は Stop 状態でのみ可能です。",
             symbolName: "circle.grid.2x2"
         ),
         OnboardingPage(

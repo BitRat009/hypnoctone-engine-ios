@@ -1197,3 +1197,55 @@ App Store のアクセシビリティガイドライン準拠を目指し、Voic
 - [ ] Phase 8 (後続課題, Developer Program 加入後): 実機 + ヘッドフォンで BINAURAL の聴感確認、
       L/R 別 Goertzel で 217.5/222.5Hz peak と 5Hz beat の観測、harmonics suppression 要否判断、
       Dynamic Type 大設定での layout 崩れ確認
+
+## Task 31 — GROUNDING mode 追加 (低周波重心 ambient)
+
+6 番目の mode `GROUNDING` を追加。100 Hz 帯の低周波純音 (前庭神経刺激候補) と 6 Hz binaural
+beat (θ-α 境界) を複合した「単音より聞いていられる」低周波重心の ambient mode。
+
+科学的エビデンスは限定的なので、命名と説明文を中立化し「motion sickness / vestibular / 乗り物酔い」
+等の direct claim は避ける (App Store reject リスク回避)。
+
+### 設計
+
+| 役割 | 音響パラメータ |
+|------|---------------|
+| SUB (100Hz 帯純音) | A1=55Hz → **G2≒98Hz** に override、amp 強め (0.12) |
+| DRONE (6Hz binaural) | L=217Hz / R=223Hz の絶対 6Hz 差、amp 控えめ (0.10) |
+| NOISE (低域ノイズ) | 既存 pink+lowpass で amp 0.06 (cutoff は既存値維持) |
+| 5th / octave | 5th 0.04 / octave 0.03 (音色豊かさ・聞いていられる感) |
+| GRAIN | trigger 0.2/sec、amp 0.02 (極疎、気にならない sparkle) |
+| REVERB | 40 (BINAURAL 30 と SLEEP 40 の中間) |
+| rhythmDisplay | `.hz(6.0)` |
+
+### 新規要素
+
+- **`ModePreset.subBassFrequencyHz: Double?`** 追加。`nil`=A1 default (既存 5 mode)、
+  GROUNDING のみ 98.0Hz (G2) で override
+- **AudioEngineController.applyPreset** で sub voice (droneGenerators[0]) の
+  `setFrequency(preset.subBassFrequencyHz ?? currentDroneNotes[0].frequency)` を毎回明示適用
+- BINAURAL 同様 `preset.binauralBeatHz = 6.0` で既存 root binaural 経路を再利用
+- LazyVGrid 3 列で 6 mode が綺麗に 2 行配置 (3+3、空マスなし)
+
+### Phase
+
+- [x] Phase 1: Modes.swift に `case grounding` + `subBassFrequencyHz: Double?` + GROUNDING preset
+- [x] Phase 2: AudioEngineController.applyPreset で sub voice frequency override 実装
+- [x] Phase 3: AudioViewModel.currentModeLabel に "Grounding Mode" 追加 +
+      `isBinauralMode` を `isBinauralBeatMode` (preset.binauralBeatHz != nil ベース) にリネーム
+      で BINAURAL + GROUNDING 両対応
+- [x] Phase 4: WaveVisualizerView.modeSpeedMultiplier に `.grounding: 0.35` 追加
+- [x] Phase 5: OnboardingView の subtitle/body を 6 mode 対応に
+- [x] Phase 6: Codex クロスレビュー
+      - Critical/High なし、Medium 2 (SUB UI 表示の不一致 / setFrequency glide=3s 違和感) +
+        Low 6 (コメント "5 mode" 表記 / harmonics の濁り許容 / isBinauralBeatMode 妥当 / 6 mode grid 自然)
+      - Medium 1 反映: `displayNoteName(for: .sub)` で preset.subBassFrequencyHz が non-nil なら
+        `12 * log2(hz/440) + 69` で MIDI 逆算 → `Note(midiNumber:).name` で UI 表示 ("G2" 等)
+      - Medium 2 反映: `setFrequency(subTargetFreq, glideSeconds: 0)` に変更で Stop 中切替時の
+        即時周波数反映、次 Start で fade-in 開始の挙動に
+      - Low 反映 (コメント): Modes.swift と MainView.swift の「5 mode」表記を 6 mode に更新、
+        「100Hz 帯の純音刺激」→「100Hz 帯の低音レイヤー」で中立化
+- [ ] Phase 7: push → CI → artifacts で確認 (build success / 6 mode grid 表示 / layout 維持 /
+      SUB voice の表示が GROUNDING で "G2" になるか)
+- [ ] Phase 8 (後続課題, Developer Program 加入後): 実機で GROUNDING の聴感確認、
+      G2(~98Hz) と 6Hz binaural の複合効果を聴感で確認

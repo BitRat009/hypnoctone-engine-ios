@@ -1,6 +1,6 @@
 import Foundation
 
-/// アプリの 5 モード (ATMÓS 風 + Task 30 で BINAURAL 追加)。
+/// アプリの 6 モード (ATMÓS 風 + Task 30 で BINAURAL / Task 31 で GROUNDING 追加)。
 ///
 /// 各モードは `ModePreset` で audio engine の各種 amp / grain rate / reverb wet / 表示単位 /
 /// (BINAURAL のみ) L/R 絶対 Hz 差を切り替える。切替は `AudioEngineController.setMode(_:)`
@@ -21,28 +21,31 @@ enum Mode: String, CaseIterable, Identifiable {
     case meditate
     case relax
     case binaural
+    case grounding
 
     var id: String { rawValue }
 
     /// UI 表示用の大文字ラベル (ATMÓS と同じ)。
     var label: String {
         switch self {
-        case .sleep:    return "SLEEP"
-        case .focus:    return "FOCUS"
-        case .meditate: return "MEDITATE"
-        case .relax:    return "RELAX"
-        case .binaural: return "BINAURAL"
+        case .sleep:     return "SLEEP"
+        case .focus:     return "FOCUS"
+        case .meditate:  return "MEDITATE"
+        case .relax:     return "RELAX"
+        case .binaural:  return "BINAURAL"
+        case .grounding: return "GROUNDING"
         }
     }
 
     /// このモードに紐付くプリセット値。
     var preset: ModePreset {
         switch self {
-        case .sleep:    return .sleep
-        case .focus:    return .focus
-        case .meditate: return .meditate
-        case .relax:    return .relax
-        case .binaural: return .binaural
+        case .sleep:     return .sleep
+        case .focus:     return .focus
+        case .meditate:  return .meditate
+        case .relax:     return .relax
+        case .binaural:  return .binaural
+        case .grounding: return .grounding
         }
     }
 }
@@ -136,7 +139,12 @@ struct ModePreset {
     /// non-nil: L = centerFreq - beatHz/2、R = centerFreq + beatHz/2 で固定。
     let binauralBeatHz: Double?
 
-    // MARK: - 5 モードの初期プリセット
+    /// GROUNDING mode 用: sub voice (DRONE [0]) の中央周波数を override (Task 31)。
+    /// `nil`: A1=55Hz default (既存 5 mode)。
+    /// non-nil: 指定 Hz に setFrequency。GROUNDING では G2≒98Hz で「100Hz 帯の低音レイヤー」を提供。
+    let subBassFrequencyHz: Double?
+
+    // MARK: - 6 モードの初期プリセット
 
     /// SLEEP モード (デフォルト、Task 20 までの現状を維持):
     /// 低音重心 (sub 込み) / grain 適度 / reverb 強め / BPM 30。
@@ -151,7 +159,8 @@ struct ModePreset {
         grainPitches: [554.37, 659.26, 739.99, 880.00],  // C#5 / E5 / F#5 / A5
         reverbWetDryMix: 40.0,
         rhythmDisplay: .bpm(30),
-        binauralBeatHz: nil
+        binauralBeatHz: nil,
+        subBassFrequencyHz: nil
     )
 
     /// FOCUS モード:
@@ -167,7 +176,8 @@ struct ModePreset {
         grainPitches: [554.37, 659.26, 739.99, 880.00],
         reverbWetDryMix: 25.0,
         rhythmDisplay: .bpm(60),
-        binauralBeatHz: nil
+        binauralBeatHz: nil,
+        subBassFrequencyHz: nil
     )
 
     /// MEDITATE モード:
@@ -183,7 +193,8 @@ struct ModePreset {
         grainPitches: [554.37, 659.26, 739.99, 880.00],
         reverbWetDryMix: 65.0,
         rhythmDisplay: .bpm(6),
-        binauralBeatHz: nil
+        binauralBeatHz: nil,
+        subBassFrequencyHz: nil
     )
 
     /// RELAX モード:
@@ -199,7 +210,8 @@ struct ModePreset {
         grainPitches: [554.37, 659.26, 739.99, 880.00],
         reverbWetDryMix: 35.0,
         rhythmDisplay: .bpm(75),
-        binauralBeatHz: nil
+        binauralBeatHz: nil,
+        subBassFrequencyHz: nil
     )
 
     /// BINAURAL モード (Task 30): root voice を L/R 絶対 5Hz 差で再生して binaural beat を作る。
@@ -227,6 +239,32 @@ struct ModePreset {
         grainPitches: [554.37, 659.26, 739.99, 880.00],
         reverbWetDryMix: 30.0,  // 4 mode より控えめで左右差を聴感優先
         rhythmDisplay: .hz(5.0),
-        binauralBeatHz: 5.0     // L=217.5Hz / R=222.5Hz (A3=220Hz 中心の ±2.5Hz)
+        binauralBeatHz: 5.0,    // L=217.5Hz / R=222.5Hz (A3=220Hz 中心の ±2.5Hz)
+        subBassFrequencyHz: nil
+    )
+
+    /// GROUNDING モード (Task 31): 100Hz 帯の低周波純音 + 6Hz binaural を複合した低周波重心 ambient。
+    ///
+    /// 「単音だと聞いていられない」問題を回避するため、以下を組み合わせる:
+    /// - **SUB voice** を G2 (97.999Hz) に override → 100Hz 帯の低音レイヤー
+    /// - **DRONE (root) voice** に 6Hz binaural beat (θ-α 境界、BINAURAL 5Hz より高め)
+    /// - **NOISE / 5th / octave / GRAIN / REVERB** を控えめに敷いて「聞いていられる」音色の豊かさを確保
+    ///
+    /// 命名・説明文の方針: 「motion sickness / 乗り物酔い / 前庭神経」等の direct claim は避け、
+    /// 「100Hz 中心の低周波 ambient と 6Hz binaural を組み合わせた静かな音響」程度の中立記述
+    /// (App Store reject リスク回避)。科学的エビデンスは限定的なので効果を断定しない。
+    static let grounding = ModePreset(
+        subAmp: 0.12,           // 100Hz 帯純音を主役にして強め
+        rootAmp: 0.10,          // 6Hz binaural beat 用、控えめ
+        fifthAmp: 0.04,         // 音色豊かさのため薄く
+        octaveAmp: 0.03,
+        noiseAmp: 0.06,         // 低域ノイズ (cutoff は既存設定維持)
+        grainTriggersPerSecond: 0.2,  // 極疎 (5 秒に 1 発、気にならない sparkle)
+        grainAmp: 0.02,
+        grainPitches: [554.37, 659.26, 739.99, 880.00],
+        reverbWetDryMix: 40.0,  // SLEEP と同じ程度、BINAURAL より広め
+        rhythmDisplay: .hz(6.0),
+        binauralBeatHz: 6.0,    // root voice L=217Hz / R=223Hz (A3=220Hz 中心の ±3Hz)
+        subBassFrequencyHz: 97.999  // G2 (MIDI 43、A3 から minor 7th 下)、100Hz 帯純音刺激候補
     )
 }
