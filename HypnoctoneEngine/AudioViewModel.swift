@@ -210,11 +210,22 @@ final class AudioViewModel: ObservableObject {
         case .focus:    return "Focus Mode"
         case .meditate: return "Meditate Mode"
         case .relax:    return "Relax Mode"
+        case .binaural: return "Binaural Mode"
         }
     }
 
-    /// UI 表示用 BPM (ATMÓS の "BPM 30" 表記再現)。
-    var bpm: Int { controller.currentMode.preset.bpm }
+    /// 現在モードのリズム表示 (Task 30 で `bpm: Int` から拡張)。
+    /// 4 mode は `.bpm(N)`、BINAURAL は `.hz(N)` で UI 側が "BPM 30" / "5 Hz" に切替表示。
+    var rhythmDisplay: RhythmDisplay { controller.currentMode.preset.rhythmDisplay }
+
+    /// UI 表示用テキスト ("BPM 30" / "5 Hz")。
+    var rhythmDisplayText: String { rhythmDisplay.displayText }
+
+    /// VoiceOver 用テキスト ("Beats per minute 30" / "5 hertz")。
+    var rhythmDisplayAccessibilityText: String { rhythmDisplay.accessibilityText }
+
+    /// 現在モードが BINAURAL かどうか (UI hint 切替用)。
+    var isBinauralMode: Bool { controller.currentMode == .binaural }
 
     /// UI に表示する全モード一覧 (ボタングリッド用)。`Mode.allCases` を直接公開する。
     var allModes: [Mode] { Mode.allCases }

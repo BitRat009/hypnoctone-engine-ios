@@ -1137,3 +1137,56 @@ App Store のアクセシビリティガイドライン準拠を目指し、Voic
         4 voice 横並び / 4 mode 横並び / 6 timer preset 横並びは崩れずレイアウト維持
       - Dynamic Type 大設定 / VoiceOver / Reduce Motion の挙動は CI 環境では検証不能 (実機 Phase 6)
 - [ ] Phase 6 (後続課題, Developer Program 加入後): 実機で VoiceOver / Reduce Motion / Dynamic Type 大の挙動を実体験で確認
+
+## Task 30 — Binaural Beats モード追加
+
+5 番目の mode `BINAURAL` を追加。L/R に異なる周波数を出力して脳が差分をビートとして
+知覚する仕組みを利用、θ-α 境界 (5Hz) の固定ビート周波数で「リラックスして覚醒」を狙う。
+
+### 設計
+
+- **配置**: 既存 4 mode と並列で 5 番目の `case binaural`。enum Mode に追加、preset も
+- **音響核**: root voice (A3=220Hz) を L=217.5Hz / R=222.5Hz の絶対 5Hz 差で再生。
+  既存の DroneGenerator の cent ベース L/R detune (Task 10) とは別経路で「絶対 Hz 差」を
+  指定する API を新規追加 (`setBinauralBeat(centerFreq:beatHz:)`)
+- **他 voice**: sub / 5th / octave は preset.binaural の amp 値 (controlled に薄め)、
+  noise も極小で binaural beat の知覚を阻害しないようにする
+- **ModePreset**: `binauralBeatHz: Double?` プロパティ追加。既存 4 mode は `nil` で
+  cent ベース detune を継続、BINAURAL は `5.0` で root voice のみ絶対 Hz 差に切替
+- **UI**: BPM 表示の代わりに "5 Hz" 表記 (将来複数選択可にする場合の拡張点)。
+  ヘッドフォン推奨だがスピーカーでも害なし (両耳に違う周波数が届かないので「ただの 2 音」になる)
+- **mode 切替制約**: 既存通り Stop 状態のみ切替可
+- **CI 検証**: WAV (stereo 44.1kHz/16bit) に root voice 帯域で約 5Hz の振幅変調 (= ビート) が
+  L/R の合成で観測できるはず (interference beat pattern)。FFT で 220Hz 周辺の bandwidth を見ると
+  L=217.5/R=222.5 の 2 peak、もしくはモノ加算で 5Hz の AM が現れる
+
+### Phase
+
+- [x] Phase 1: Codex に design 相談
+      - High (App Store 医療表現緩和) + Medium 4 (StereoDetuneMode enum / RhythmDisplay enum /
+        DRONE MUTE UX hint / 5 mode 配置) + Low 5 (centerFreq / validation / headphone 注記 /
+        reverb 30 / CI 検証) を全反映
+- [x] Phase 2: Modes.swift に `case binaural` + `RhythmDisplay` enum + `binauralBeatHz` 追加、
+      BINAURAL preset 定義 (rootAmp 0.22 強め、他控えめ、reverb 30、`rhythmDisplay: .hz(5.0)`)
+- [x] Phase 3: DroneGenerator に `StereoDetuneMode` enum と `setStereoDetuneMode(_:centerFreq:glideSeconds:)`
+      追加。既存 `setFrequency` も共通 helper `scheduleStereoUpdate` 経由に refactor。
+      precondition で beatHz > 0 と `centerFreq - hz/2 > 20` を検証 (Codex Low 反映)
+- [x] Phase 4: AudioEngineController.applyPreset 末尾で root voice に `binauralBeatHz` で
+      `.absoluteBeatHz` / nil で `.cents(2.0)` を明示適用。中央周波数は `currentDroneNotes[1].frequency` 由来
+- [x] Phase 5: MainView の modeSelector を `LazyVGrid` 3 列 grid に (上段 SLEEP/FOCUS/MEDITATE、
+      下段 RELAX/BINAURAL/空)。`rhythmDisplayText` で "BPM N" / "5 Hz" 切替。BINAURAL 選択時に
+      "Headphones recommended" 注記。DRONE MUTE の VoiceOver hint に BINAURAL 時の補足
+      ("DRONE carries the binaural beat")。Onboarding も 5 mode 説明に更新
+- [x] Phase 6: Codex 実装後 review
+      - Critical/High なし、Medium 2 (root voice harmonics による 10/15Hz 副 beat / pitch LFO による
+        center 微小揺らぎ) + Low 4 (setMode コメント 4 mode 表記 / generative pitch 再有効化注意 /
+        LazyVGrid 5 要素配置 / Equatable 不要 / 文言)
+      - 反映: 全 Medium はコメントで明示 (BINAURAL preset / applyPreset 内に harmonics の比例差 +
+        LFO 微小揺らぎ + generative pitch 再有効化リスクを注記)。Phase 8 で実機聴感確認後に
+        harmonics suppression API を追加するかは別途判断
+- [ ] Phase 7: push → CI → artifacts で確認
+      - build success / 既存 4 mode 動作維持 / wave visualizer 描画維持
+      - WAV は SLEEP モードで自動再生 (CI_AUTOSTART は mode を変えないため)、
+        BINAURAL の FFT 検証は実機 Phase 8 に送る
+- [ ] Phase 8 (後続課題, Developer Program 加入後): 実機 + ヘッドフォンで BINAURAL の聴感確認、
+      L/R 別 Goertzel で 217.5/222.5Hz peak と 5Hz beat の観測、harmonics suppression 要否判断

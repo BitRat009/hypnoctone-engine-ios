@@ -1,18 +1,17 @@
 import Foundation
 
-/// アプリの 4 モード (ATMÓS 風)。SLEEP / FOCUS / MEDITATE / RELAX の動作プロファイル。
+/// アプリの 5 モード (ATMÓS 風 + Task 30 で BINAURAL 追加)。
 ///
-/// 各モードは `ModePreset` で audio engine の各種 amp / grain rate / reverb wet を切り替える。
-/// 切替は `AudioEngineController.setMode(_:)` で行うが、現状は **Stop 状態でのみ可能**
-/// (ATMÓS の "Stop playback to change mode" と同じ設計)。これにより engine.stop() 完了後の
-/// audio thread が動いていない状態でしか generator のパラメータを書き換えないため、
-/// thread safety を atomic publish なしで確保できる。
+/// 各モードは `ModePreset` で audio engine の各種 amp / grain rate / reverb wet / 表示単位 /
+/// (BINAURAL のみ) L/R 絶対 Hz 差を切り替える。切替は `AudioEngineController.setMode(_:)`
+/// で行うが、現状は **Stop 状態でのみ可能** (ATMÓS の "Stop playback to change mode" と同じ設計)。
 ///
-/// 各モードの音響特徴 (脳波研究・音響心理学・既存アプリの慣行に基づく方向性):
-/// - **SLEEP**: 低音重心・grain 疎・reverb 強め (δ-θ 波 0.5〜8Hz 領域、眠気誘導)
-/// - **FOCUS**: 中音域・ノイズ強め (集中の壁)・grain 控えめ (β 波 14〜20Hz、集中)
-/// - **MEDITATE**: 重低音・極ゆっくり・深い reverb (θ 波 4〜8Hz、瞑想)
-/// - **RELAX**: 中域明るめ・grain 多め (α 波 8〜13Hz、覚醒維持リラックス)
+/// 各モードの音響特徴 (audio path での違いの記述、医療効果の主張は避ける):
+/// - **SLEEP**: 低音重心・grain 疎・reverb 強め (BPM 30)
+/// - **FOCUS**: 中音域・ノイズ強め・grain 控えめ (BPM 60)
+/// - **MEDITATE**: 重低音・極ゆっくり・深い reverb (BPM 6)
+/// - **RELAX**: 中域明るめ・grain 多め (BPM 75)
+/// - **BINAURAL**: root voice (A3) を L/R 絶対 5Hz 差で再生、他 voice は控えめ (5 Hz、Task 30)
 ///
 /// 厳密な業界標準は無く、上記は Hypnoctone の音色アイデンティティとしての初期プリセット。
 /// 実機テストで聴感調整する想定。
@@ -21,6 +20,7 @@ enum Mode: String, CaseIterable, Identifiable {
     case focus
     case meditate
     case relax
+    case binaural
 
     var id: String { rawValue }
 
@@ -31,6 +31,7 @@ enum Mode: String, CaseIterable, Identifiable {
         case .focus:    return "FOCUS"
         case .meditate: return "MEDITATE"
         case .relax:    return "RELAX"
+        case .binaural: return "BINAURAL"
         }
     }
 
@@ -41,7 +42,45 @@ enum Mode: String, CaseIterable, Identifiable {
         case .focus:    return .focus
         case .meditate: return .meditate
         case .relax:    return .relax
+        case .binaural: return .binaural
         }
+    }
+}
+
+/// UI 上の「リズム表示」単位。`ModePreset.rhythmDisplay` で mode 別に切り替える
+/// (Codex Task 30 Medium 反映で `bpm: Int` 兼用を廃止)。
+///
+/// - `.bpm(N)`: 既存 4 mode (SLEEP/FOCUS/MEDITATE/RELAX) で「モードの体感速度」を BPM で
+/// - `.hz(N)`: BINAURAL mode でビート周波数を Hz で
+///
+/// 将来 BINAURAL 内で δ(2Hz)/θ(5Hz)/α(10Hz)/β(20Hz) を切り替える拡張時は `.hz` の値だけ
+/// 変えれば UI 表示は自動追従する。
+enum RhythmDisplay {
+    case bpm(Int)
+    case hz(Double)
+
+    /// UI 表示用の文字列 (例: "BPM 30" / "5 Hz")。
+    var displayText: String {
+        switch self {
+        case .bpm(let n): return "BPM \(n)"
+        case .hz(let v):  return "\(formatted(v)) Hz"
+        }
+    }
+
+    /// VoiceOver 用の発話文字列 (例: "Beats per minute 30" / "5 hertz")。
+    var accessibilityText: String {
+        switch self {
+        case .bpm(let n): return "Beats per minute \(n)"
+        case .hz(let v):  return "\(formatted(v)) hertz"
+        }
+    }
+
+    /// 整数値 (例: 5.0 → "5") と小数値 (例: 5.5 → "5.5") を見やすく整形する。
+    private func formatted(_ v: Double) -> String {
+        if v == v.rounded() {
+            return String(Int(v))
+        }
+        return String(format: "%.1f", v)
     }
 }
 
@@ -49,17 +88,21 @@ enum Mode: String, CaseIterable, Identifiable {
 ///
 /// 簡素化方針 (Task 21 初期実装):
 /// - **rootNote / scale は全モード共通 (A3 MajPentatonic)** で audio path を簡略化
-/// - 切替対象は: 各 drone amp / noise amp / grain rate / grain amp / reverb wet / 表示 BPM のみ
+/// - 切替対象は: 各 drone amp / noise amp / grain rate / grain amp / reverb wet / 表示 BPM 等
 /// - 実機テスト後に「FOCUS は中音域に、MEDITATE は重低音に」のような root 切替が必要になったら拡張
 ///
-/// `bpm` は audio engine には影響せず UI 表示用 (ATMÓS の "BPM 30" 表記を再現)。
-/// 内部の LFO/envelope 周期も共通 (Task 20 までの値を保持) で、Mode 切替の聴感差は
-/// あくまで amp バランス + grain trigger 頻度 + reverb 深さ で表現する。
+/// Task 30 で `binauralBeatHz: Double?` を追加。non-nil の mode (= BINAURAL) では root voice を
+/// 既存 cent ベース detune の代わりに絶対 Hz 差で L/R 分割する (StereoDetuneMode 経由)。
+/// 他 voice (sub/5th/octave) は既存と同じ cent detune を維持。
+///
+/// `rhythmDisplay` は UI 表示用の単位 (BPM or Hz)。audio engine には影響しない。
+/// 内部の LFO/envelope 周期は全 mode 共通で、Mode 切替の聴感差は amp バランス + grain trigger
+/// 頻度 + reverb 深さ + (BINAURAL のみ) L/R 絶対 Hz 差 で表現する。
 struct ModePreset {
     /// Drone[0] = sub bass voice の amp (A1=55Hz)。
     let subAmp: Float
 
-    /// Drone[1] = root voice の amp (A3=220Hz)。
+    /// Drone[1] = root voice の amp (A3=220Hz)。BINAURAL では binaural beat の主成分。
     let rootAmp: Float
 
     /// Drone[2] = 5th voice の amp (E4=329.63Hz)。
@@ -84,15 +127,19 @@ struct ModePreset {
     /// Reverb の wet/dry ミックス比 (0.0〜100.0、AVAudioUnitReverb.wetDryMix と同等)。
     let reverbWetDryMix: Float
 
-    /// UI 表示用の BPM 値 (audio engine には影響しない)。
-    /// ATMÓS の "BPM 30" 表記と同じく「モードの体感速度」を数字化したもの。
-    let bpm: Int
+    /// UI 表示用のリズム単位 (Task 30 で `bpm: Int` から拡張)。
+    /// `.bpm(N)` または `.hz(N)`。audio engine には影響しない。
+    let rhythmDisplay: RhythmDisplay
 
-    // MARK: - 4 モードの初期プリセット
+    /// BINAURAL mode 用: root voice (DRONE [1]) の L/R 絶対 Hz 差 (Task 30)。
+    /// `nil`: 既存 cent ベース detune を維持 (4 mode 用)。
+    /// non-nil: L = centerFreq - beatHz/2、R = centerFreq + beatHz/2 で固定。
+    let binauralBeatHz: Double?
+
+    // MARK: - 5 モードの初期プリセット
 
     /// SLEEP モード (デフォルト、Task 20 までの現状を維持):
     /// 低音重心 (sub 込み) / grain 適度 / reverb 強め / BPM 30。
-    /// δ-θ 波領域の「眠気誘導」音響。
     static let sleep = ModePreset(
         subAmp: 0.05,
         rootAmp: 0.15,
@@ -103,54 +150,83 @@ struct ModePreset {
         grainAmp: 0.04,
         grainPitches: [554.37, 659.26, 739.99, 880.00],  // C#5 / E5 / F#5 / A5
         reverbWetDryMix: 40.0,
-        bpm: 30
+        rhythmDisplay: .bpm(30),
+        binauralBeatHz: nil
     )
 
     /// FOCUS モード:
-    /// sub を切って中音域寄り / ノイズ強め (集中の壁) / grain 控えめ / reverb 控えめ / BPM 60。
-    /// β 波領域の「集中」音響。
+    /// sub を切って中音域寄り / ノイズ強め / grain 控えめ / reverb 控えめ / BPM 60。
     static let focus = ModePreset(
-        subAmp: 0.0,        // sub を実質 mute (集中時は重低音不要)
+        subAmp: 0.0,
         rootAmp: 0.12,
         fifthAmp: 0.06,
         octaveAmp: 0.04,
-        noiseAmp: 0.10,     // ノイズを強めて「集中の壁」(コーヒーショップ的)
+        noiseAmp: 0.10,
         grainTriggersPerSecond: 0.8,
         grainAmp: 0.03,
         grainPitches: [554.37, 659.26, 739.99, 880.00],
-        reverbWetDryMix: 25.0,  // 空間を狭く (集中阻害しない)
-        bpm: 60
+        reverbWetDryMix: 25.0,
+        rhythmDisplay: .bpm(60),
+        binauralBeatHz: nil
     )
 
     /// MEDITATE モード:
     /// 重低音強め / grain 極疎 / reverb 深い / BPM 6 (10 秒呼吸サイクル相当)。
-    /// θ 波領域の「瞑想・内省」音響。シンギングボウル/ドローン系。
     static let meditate = ModePreset(
-        subAmp: 0.07,       // 重低音を強めて瞑想感
+        subAmp: 0.07,
         rootAmp: 0.18,
         fifthAmp: 0.10,
         octaveAmp: 0.06,
-        noiseAmp: 0.04,     // ノイズ抑えて静寂感
-        grainTriggersPerSecond: 0.3,  // 極疎 (約 3 秒に 1 発)
+        noiseAmp: 0.04,
+        grainTriggersPerSecond: 0.3,
         grainAmp: 0.05,
         grainPitches: [554.37, 659.26, 739.99, 880.00],
-        reverbWetDryMix: 65.0,  // 深い空間
-        bpm: 6
+        reverbWetDryMix: 65.0,
+        rhythmDisplay: .bpm(6),
+        binauralBeatHz: nil
     )
 
     /// RELAX モード:
     /// 中域明るめ / grain 多め / reverb 中程度 / BPM 75。
-    /// α 波領域の「リラックスするが覚醒維持」音響。
     static let relax = ModePreset(
         subAmp: 0.04,
         rootAmp: 0.13,
         fifthAmp: 0.07,
         octaveAmp: 0.05,
         noiseAmp: 0.07,
-        grainTriggersPerSecond: 1.5,  // やや密 (明るい sparkle)
+        grainTriggersPerSecond: 1.5,
         grainAmp: 0.05,
         grainPitches: [554.37, 659.26, 739.99, 880.00],
         reverbWetDryMix: 35.0,
-        bpm: 75
+        rhythmDisplay: .bpm(75),
+        binauralBeatHz: nil
+    )
+
+    /// BINAURAL モード (Task 30): root voice を L/R 絶対 5Hz 差で再生して binaural beat を作る。
+    /// 他 voice / noise / grain は控えめにして binaural の左右差を聴き取りやすくする。
+    /// Reverb は 30 (4 mode より低め) で空間を狭めることで beat の明瞭性を保つ
+    /// (Codex Task 30 Low 反映、50→30 に下げて左右差の聴感を優先)。
+    /// ヘッドフォン推奨だがスピーカーでも害なし (両耳に違う周波数が届かないので「ただの 2 音」になる)。
+    ///
+    /// **音響特性の注意** (Codex Task 30 Medium 反映、実装後 review):
+    /// - root voice の **harmonics** (2倍音 = 440Hz, 3倍音 = 660Hz) も L/R で比例的に差が出る:
+    ///   基音 5Hz 差、2倍音 10Hz 差、3倍音 15Hz 差。「純粋な 5Hz beat」ではなく
+    ///   「5/10/15Hz 複合差」の音色になる。聴感上は「重なる微小揺らぎ」として表現される。
+    /// - root voice の **pitch LFO** (lfoDepthCents 2.5) も absoluteBeatHz mode で center を
+    ///   微小に揺らすため、L/R 差は厳密 5.000Hz 固定ではなく約 5Hz の揺らぎを伴う。
+    /// - 厳密 5Hz 固定 + harmonics 無効化が必要な場合は Phase 8 で BINAURAL 専用 API (harmonics
+    ///   suppression や LFO bypass) を追加する余地あり。現状は実機聴感を優先して上記特性を許容。
+    static let binaural = ModePreset(
+        subAmp: 0.03,      // 重低音は薄め (binaural の知覚を阻害しないため)
+        rootAmp: 0.22,     // root を強めにして binaural beat を聴きやすく
+        fifthAmp: 0.04,    // 5度は控えめ (binaural beat の明瞭性優先)
+        octaveAmp: 0.03,
+        noiseAmp: 0.02,    // ノイズ極小
+        grainTriggersPerSecond: 0.3,
+        grainAmp: 0.03,
+        grainPitches: [554.37, 659.26, 739.99, 880.00],
+        reverbWetDryMix: 30.0,  // 4 mode より控えめで左右差を聴感優先
+        rhythmDisplay: .hz(5.0),
+        binauralBeatHz: 5.0     // L=217.5Hz / R=222.5Hz (A3=220Hz 中心の ±2.5Hz)
     )
 }

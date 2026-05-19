@@ -137,8 +137,8 @@ struct WaveVisualizerView: View {
         return isPlaying ? base : base * 0.3
     }
 
-    /// Mode 別の global speed 倍率。Modes.swift の bpm と方向性を合わせる
-    /// (BPM が低いモード = wave がゆっくり)。
+    /// Mode 別の global speed 倍率。Modes.swift の rhythmDisplay と方向性を合わせる
+    /// (リズム値が低いモード = wave がゆっくり)。
     /// 数値は初期値で、実機テスト後に Phase 7 で調整する想定。
     private func modeSpeedMultiplier() -> Double {
         switch mode {
@@ -146,6 +146,7 @@ struct WaveVisualizerView: View {
         case .focus:    return 1.0   // BPM 60
         case .meditate: return 0.3   // BPM 6 (極ゆっくり)
         case .relax:    return 0.8   // BPM 75
+        case .binaural: return 0.4   // 5 Hz beat (Task 30、静かな ambient、ゆっくりめ)
         }
     }
 

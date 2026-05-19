@@ -112,35 +112,58 @@ struct MainView: View {
             .accessibilityLabel(viewModel.isPlaying ? "Playback playing" : "Playback stopped")
     }
 
-    /// 4 モード切替セレクタ (Task 22, ATMÓS 風 SLEEP/FOCUS/MEDITATE/RELAX)。
+    /// 5 モード切替セレクタ (Task 22 で 4 mode 導入、Task 30 で BINAURAL 追加)。
     /// - 現在モードは Theme.accent でハイライト、他モードはサブテキスト色
     /// - canChangeMode = false (再生中・fade-out 中) なら全ボタン無効化 + 補足メッセージ
-    /// - BPM 表示 (preset.bpm) を右側に小さく
+    /// - Rhythm 表示 (preset.rhythmDisplay) を右側に小さく ("BPM N" or "N Hz")
     /// - 切替は Stop 状態のみ可能 (audio 層の Task 21 setMode が isRunning ガード)
+    ///
+    /// Task 30: 5 mode を 3 列 LazyVGrid で配置 (上段 SLEEP/FOCUS/MEDITATE、下段 RELAX/BINAURAL/空)。
+    /// 5 mode 横並びは iPhone SE 幅 + Dynamic Type 大設定で潰れるため Grid 化 (Codex Task 30 Medium 反映)。
     private var modeSelector: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 6) {
+            LazyVGrid(columns: modeGridColumns, spacing: 6) {
                 ForEach(viewModel.allModes) { mode in
                     modeButton(mode: mode)
                 }
             }
             // canChangeMode が false (= 再生中 / fade-out 中) のときは補足メッセージで誘導する。
-            // 一方 BPM 表示は常時出して「このモードのリズム感」を視覚化する。
+            // BINAURAL モード中は "Headphones recommended" を表示 (Codex Task 30 Low 反映)。
+            // BPM/Hz 表示は常時出して「このモードのリズム感」を視覚化する。
             HStack {
-                if !viewModel.canChangeMode {
-                    Text("Stop playback to change mode")
-                        .font(.system(.caption2, design: .rounded))
-                        .foregroundColor(Theme.secondaryText)
-                        .opacity(0.7)
-                }
+                modeNotice
                 Spacer()
-                Text("BPM \(viewModel.bpm)")
+                Text(viewModel.rhythmDisplayText)
                     .font(.system(.caption2, design: .rounded))
                     .tracking(1)
                     .foregroundColor(Theme.secondaryText)
-                    .accessibilityLabel("Beats per minute \(viewModel.bpm)")
+                    .accessibilityLabel(viewModel.rhythmDisplayAccessibilityText)
             }
             .padding(.horizontal, 2)
+        }
+    }
+
+    /// 3 列 grid 用 GridItem 配列。flexible で等幅に分配される。
+    private var modeGridColumns: [GridItem] {
+        [GridItem(.flexible(), spacing: 6),
+         GridItem(.flexible(), spacing: 6),
+         GridItem(.flexible(), spacing: 6)]
+    }
+
+    /// BPM/Hz 表示行の左側に出す補足メッセージ。
+    /// 優先順位: canChangeMode=false の警告 > BINAURAL の headphone 推奨。
+    @ViewBuilder
+    private var modeNotice: some View {
+        if !viewModel.canChangeMode {
+            Text("Stop playback to change mode")
+                .font(.system(.caption2, design: .rounded))
+                .foregroundColor(Theme.secondaryText)
+                .opacity(0.7)
+        } else if viewModel.isBinauralMode {
+            Text("Headphones recommended")
+                .font(.system(.caption2, design: .rounded))
+                .foregroundColor(Theme.secondaryText)
+                .opacity(0.7)
         }
     }
 
@@ -207,11 +230,26 @@ struct MainView: View {
     private var voiceGrid: some View {
         HStack(spacing: 8) {
             ForEach(viewModel.voiceGroups) { vg in
-                voiceCell(label: vg.label, noteName: vg.noteName, isMuted: vg.isMuted) {
+                voiceCell(
+                    label: vg.label,
+                    noteName: vg.noteName,
+                    isMuted: vg.isMuted,
+                    muteExtraHint: muteExtraHint(for: vg.group)
+                ) {
                     viewModel.toggleMute(vg.group)
                 }
             }
         }
+    }
+
+    /// 特定 voice グループの MUTE ボタンに追加で出す accessibility hint (Task 30)。
+    /// 現状は BINAURAL モード中の DRONE のみ「binaural beat を担う voice なので mute すると
+    /// 効果が消える」旨を VoiceOver に伝える (Codex Task 30 Medium 反映で UX 注意喚起)。
+    private func muteExtraHint(for group: AudioEngineController.VoiceGroup) -> String? {
+        if viewModel.isBinauralMode && group == .drone {
+            return "DRONE carries the binaural beat. Muting it removes the beat."
+        }
+        return nil
     }
 
     /// 1 voice 分のセル: ラベル / Note 名 / MUTE ボタン。
@@ -220,7 +258,14 @@ struct MainView: View {
     /// Task 29: voice ラベルと note 名を 1 つの accessibility element として読み上げる
     /// (例: "TONE voice, E4 and A4, playing")。MUTE ボタンは別個に label + value + hint。
     /// note 名の "·" / "/" 区切りは VoiceOver が読みづらいので "and" に置換する。
-    private func voiceCell(label: String, noteName: String, isMuted: Bool, onMuteTap: @escaping () -> Void) -> some View {
+    /// Task 30: `muteExtraHint` で mode 固有の追加 hint を渡せる (例: BINAURAL + DRONE)。
+    private func voiceCell(
+        label: String,
+        noteName: String,
+        isMuted: Bool,
+        muteExtraHint: String? = nil,
+        onMuteTap: @escaping () -> Void
+    ) -> some View {
         VStack(spacing: 6) {
             VStack(spacing: 6) {
                 Text(label)
@@ -256,9 +301,17 @@ struct MainView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("\(label) mute")
             .accessibilityValue(isMuted ? "On" : "Off")
-            .accessibilityHint("Toggle \(label) voice mute")
+            .accessibilityHint(combinedMuteHint(label: label, extra: muteExtraHint))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// MUTE ボタン用の accessibility hint を組み立てる。
+    /// 基本: "Toggle <label> voice mute"。`extra` 非 nil なら "Toggle ... . <extra>" を結合。
+    private func combinedMuteHint(label: String, extra: String?) -> String {
+        let base = "Toggle \(label) voice mute"
+        guard let extra = extra, !extra.isEmpty else { return base }
+        return "\(base). \(extra)"
     }
 
     /// "E4·A4" や "C#5/E5/F#5/A5" のような note 名表記を VoiceOver 用に変換する。

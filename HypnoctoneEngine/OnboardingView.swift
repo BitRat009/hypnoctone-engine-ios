@@ -30,13 +30,13 @@ struct OnboardingView: View {
         OnboardingPage(
             title: "Hypnoctone",
             subtitle: "Ambient audio for sleep, focus & rest",
-            body: "深い呼吸のような ambient drone と粒状音響で、就寝・集中・瞑想・リラックスをサポートする音響アプリです。",
+            body: "深い呼吸のような ambient drone と粒状音響を組み合わせた、静かで継続的な音響体験を提供します。就寝前のリラックスや集中したい場面で活用できます。",
             symbolName: "waveform"
         ),
         OnboardingPage(
-            title: "4 つのモード",
-            subtitle: "SLEEP / FOCUS / MEDITATE / RELAX",
-            body: "それぞれ脳波研究と音響心理学に基づいた音響プロファイルです。SLEEP は眠気誘導、FOCUS は集中、MEDITATE は瞑想、RELAX は覚醒維持リラックスを狙います。モード切替は Stop 状態でのみ可能です。",
+            title: "5 つのモード",
+            subtitle: "SLEEP / FOCUS / MEDITATE / RELAX / BINAURAL",
+            body: "5 つのモードはそれぞれ異なる音響プロファイル (低音強度・grain 頻度・reverb 深さ等) を持ちます。BINAURAL は L/R で 5 Hz 異なる周波数を出力する静かなステレオ音響です (ヘッドフォン推奨)。モード切替は Stop 状態でのみ可能です。",
             symbolName: "circle.grid.2x2"
         ),
         OnboardingPage(

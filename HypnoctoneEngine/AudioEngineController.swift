@@ -567,14 +567,14 @@ final class AudioEngineController: ObservableObject {
         engine.mainMixerNode.outputVolume = clamped
     }
 
-    // MARK: - Mode 切替 (Task 21)
+    // MARK: - Mode 切替 (Task 21、Task 30 で BINAURAL 追加)
 
-    /// モードを切り替える (SLEEP / FOCUS / MEDITATE / RELAX)。
+    /// モードを切り替える (SLEEP / FOCUS / MEDITATE / RELAX / BINAURAL)。
     ///
     /// **engine 動作中は ignore + 警告ログ** (ATMÓS の "Stop playback to change mode" と同じ設計)。
-    /// 各 generator のパラメータ (defaultAmplitude / grain rate / grain pitches) を書き換える際に
-    /// audio thread が動いていない状態を保証するため。realtime / offline どちらでも engine.stop()
-    /// 完了後 (isRunning=false) なら呼べる。
+    /// 各 generator のパラメータ (defaultAmplitude / grain rate / grain pitches / root の
+    /// stereo detune mode) を書き換える際に audio thread が動いていない状態を保証するため。
+    /// realtime / offline どちらでも engine.stop() 完了後 (isRunning=false) なら呼べる。
     ///
     /// Reverb wetDryMix だけは AVAudioUnit のスレッド安全な property なので engine 動作中でも
     /// 設定可能だが、設計の一貫性のため Stop 中に限定する。
@@ -616,6 +616,30 @@ final class AudioEngineController: ObservableObject {
         // Reverb の wet/dry ミックス比を更新。AVAudioUnitReverb の wetDryMix は
         // AVAudioUnit のプロパティで、Stop 中なら確実に安全。
         reverbNode.wetDryMix = preset.reverbWetDryMix
+
+        // Task 30: BINAURAL 対応。root voice (droneGenerators[1]) の L/R detune を切り替える。
+        // - `binauralBeatHz` が nil (4 mode): `.cents(2.0)` で既存 cent detune に明示復帰
+        // - non-nil (BINAURAL): `.absoluteBeatHz(N)` で絶対 Hz 差に切替
+        // 中央周波数は currentDroneNotes[1].frequency 由来 (Codex Task 30 Low 反映で直書き回避)。
+        //
+        // **将来 generative pitch (Task 16) を再有効化した場合の注意** (Codex Task 30 Low 反映):
+        // root pitch 変化時に `setFrequency()` が呼ばれると `.cents(renderState.detuneCents)` で
+        // cent detune に戻り、BINAURAL の absolute Hz 差が解除される。BINAURAL mode 中の
+        // generative pitch を許容するなら、setFrequency 経路で「現在 BINAURAL なら absolute mode
+        // を維持」する分岐が必要。現状 generative pitch は OFF なので影響なし。
+        let rootCenter = currentDroneNotes[1].frequency
+        if let beatHz = preset.binauralBeatHz {
+            droneGenerators[1].setStereoDetuneMode(
+                .absoluteBeatHz(beatHz),
+                centerFreq: rootCenter
+            )
+        } else {
+            // 4 mode へ戻る経路: cent detune に明示復帰 (init 時の default 2.0)。
+            droneGenerators[1].setStereoDetuneMode(
+                .cents(2.0),
+                centerFreq: rootCenter
+            )
+        }
     }
 
     // MARK: - Voice mute (Task 20)

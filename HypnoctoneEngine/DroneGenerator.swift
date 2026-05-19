@@ -30,6 +30,19 @@ import os
 @MainActor
 final class DroneGenerator {
 
+    // MARK: - 公開型
+
+    /// L/R の detune 方式 (Task 30, BINAURAL 対応)。
+    ///
+    /// - `.cents(N)`: L/R 間の周波数差を cent 単位で指定 (init 時の default は 2.0)。
+    ///   既存 4 mode (SLEEP/FOCUS/MEDITATE/RELAX) で使われる cent ベースの「うなり」detune。
+    /// - `.absoluteBeatHz(N)`: L/R 間の周波数差を絶対 Hz 単位で指定 (BINAURAL mode 専用)。
+    ///   中央周波数を中心に ±N/2 ずつ振り分ける (例: 220Hz 中心 + 5Hz → L=217.5 / R=222.5)。
+    enum StereoDetuneMode {
+        case cents(Double)
+        case absoluteBeatHz(Double)
+    }
+
     // MARK: - 公開状態
 
     /// AVAudioEngine に attach する source node。
@@ -412,12 +425,53 @@ final class DroneGenerator {
     ///   - frequency: 新しい基音周波数 (Hz, 中心)。L/R は detune の半幅ずつ両側に振られる。
     ///   - glideSeconds: 線形補間時間 (秒)。0 で即時切替（クリック回避は phase 連続維持で OK）。
     func setFrequency(_ frequency: Double, glideSeconds: TimeInterval = 3.0) {
-        // L/R 別 phaseIncrement を再計算（detune は init 時の値を保持）。
-        let halfCents = renderState.detuneCents / 2.0
-        let ratioLow = pow(2.0, -halfCents / 1200.0)
-        let ratioHigh = pow(2.0, halfCents / 1200.0)
-        let freqL = frequency * ratioLow
-        let freqR = frequency * ratioHigh
+        // 既存 cent detune を維持したまま中央周波数だけ更新する。
+        // Task 30 の `setStereoDetuneMode` 経路と区別するため、init 時の detuneCents を使う。
+        scheduleStereoUpdate(
+            centerFreq: frequency,
+            mode: .cents(renderState.detuneCents),
+            glideSeconds: glideSeconds,
+            logTag: "pitch"
+        )
+    }
+
+    // MARK: - Stereo detune mode 切替（Task 30, BINAURAL 対応）
+
+    /// L/R の detune 方式を切り替える (Task 30)。BINAURAL mode で root voice を絶対 Hz 差で
+    /// L/R 分割するために使う。他 mode (SLEEP/FOCUS/MEDITATE/RELAX) に戻す時は同じ API で
+    /// `.cents(2.0)` を渡すことで明示的に cent 経路へ復帰する (Codex Task 30 Medium 反映で
+    /// 「暗黙の reset」を避け、`StereoDetuneMode` enum で意図を明示)。
+    ///
+    /// 既存 `setFrequency` と同じ seqlock writer (pitch generation) を使うため、glide や
+    /// data race の挙動は共通。`setFrequency` の直後に `setStereoDetuneMode` を呼んでも
+    /// 順次上書きで動作し、最後に書き込まれた値が audio thread に伝わる。
+    ///
+    /// - Parameters:
+    ///   - mode: 新しい detune 方式 (`.cents(_)` or `.absoluteBeatHz(_)`)
+    ///   - centerFreq: 中央周波数 (Hz)。L/R はこれを中心に左右に振り分けられる。
+    ///   - glideSeconds: 線形補間時間 (秒)。
+    func setStereoDetuneMode(
+        _ mode: StereoDetuneMode,
+        centerFreq: Double,
+        glideSeconds: TimeInterval = 3.0
+    ) {
+        scheduleStereoUpdate(
+            centerFreq: centerFreq,
+            mode: mode,
+            glideSeconds: glideSeconds,
+            logTag: "stereo-mode"
+        )
+    }
+
+    /// `setFrequency` と `setStereoDetuneMode` の共通実装。L/R 別 phaseIncrement を計算し、
+    /// pitch seqlock writer プロトコル (pendingPitchGeneration odd/even) で store する。
+    private func scheduleStereoUpdate(
+        centerFreq: Double,
+        mode: StereoDetuneMode,
+        glideSeconds: TimeInterval,
+        logTag: String
+    ) {
+        let (freqL, freqR) = stereoFrequencies(centerFreq: centerFreq, mode: mode)
         let targetIncL = renderState.twoPi * freqL / sampleRate
         let targetIncR = renderState.twoPi * freqR / sampleRate
         let glideFrames = max(0, Int(sampleRate * glideSeconds))
@@ -430,7 +484,27 @@ final class DroneGenerator {
         renderState.pendingGlideFrames.store(glideFrames, ordering: .relaxed)
         // 3) writer 完了マーク (even)
         let newGen = renderState.pendingPitchGeneration.wrappingIncrementThenLoad(by: 1, ordering: .releasing)
-        logger.info("Drone pitch set: \(frequency, privacy: .public)Hz glide=\(glideSeconds, privacy: .public)s gen=\(newGen)")
+        logger.info("Drone \(logTag, privacy: .public): center=\(centerFreq, privacy: .public)Hz L=\(freqL, privacy: .public) R=\(freqR, privacy: .public) glide=\(glideSeconds, privacy: .public)s gen=\(newGen)")
+    }
+
+    /// 中央周波数と detune モードから L/R 別の絶対周波数を計算する。
+    /// `.cents(N)`: 中央 × `2^(±N/2/1200)` で対数的に左右振り分け
+    /// `.absoluteBeatHz(N)`: 中央 ± N/2 で直接 Hz 差を作る (Task 30 BINAURAL の核心)
+    private func stereoFrequencies(centerFreq: Double, mode: StereoDetuneMode) -> (freqL: Double, freqR: Double) {
+        switch mode {
+        case .cents(let cents):
+            let halfCents = cents / 2.0
+            let ratioLow = pow(2.0, -halfCents / 1200.0)
+            let ratioHigh = pow(2.0, halfCents / 1200.0)
+            return (centerFreq * ratioLow, centerFreq * ratioHigh)
+        case .absoluteBeatHz(let hz):
+            // validation (Codex Task 30 Low 反映): 0 < hz、L 側が 20Hz より上で audible 範囲を維持
+            precondition(hz > 0,
+                         "absoluteBeatHz must be > 0 (got \(hz))")
+            precondition(centerFreq - hz / 2.0 > 20.0,
+                         "absoluteBeatHz too large: centerFreq=\(centerFreq), hz=\(hz), would push L below 20Hz")
+            return (centerFreq - hz / 2.0, centerFreq + hz / 2.0)
+        }
     }
 
     // MARK: - Mode 切替（Task 21）
