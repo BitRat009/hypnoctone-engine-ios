@@ -20,7 +20,7 @@ struct MainView: View {
             Theme.backgroundGradient
                 .ignoresSafeArea()
 
-            VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 header
                 Spacer(minLength: 4)
                 visualizer
@@ -33,7 +33,15 @@ struct MainView: View {
                 timerLabel
             }
             .padding(.horizontal, 24)
-            .padding(.vertical, 40)
+            // Task 30 で modeSelector が 5 mode 2 行 grid 化して縦 +56pt 増えた影響で、
+            // 既存の `.padding(.vertical, 40)` だと iPhone 画面の usable height を超えて
+            // header が status bar に被るようになった (artifacts_038 で発覚)。
+            // top は safe area + status bar で十分余白があるので 12pt まで縮め、
+            // bottom も home indicator 余白を考慮しつつ 24pt に。spacing 20→16 と
+            // 合わせて total 約 -76pt 圧縮し、Dynamic Type デフォルト設定で確実に収める。
+            // Dynamic Type 大設定での layout 崩れは Phase 8 実機検証で再評価。
+            .padding(.top, 12)
+            .padding(.bottom, 24)
         }
         .preferredColorScheme(.dark)
         // Dynamic Type は xxLarge までを許容。XL/XXL 以上は文字が大きくなりすぎて
