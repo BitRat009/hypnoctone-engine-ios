@@ -1016,8 +1016,12 @@ Sleep アプリの性質 (画面ロック前提、長時間動作、低消費電
       - Low 1 据え置き: controller 注入時の Mode/MUTE 非対称は「現状規模なら shared で許容」と
         Codex も認め、DI 化は将来テスト拡充時に再検討
       - Low 2 据え置き: `@MainActor` 限定は妥当 (UI/ViewModel 経由限定の設計と整合)
-- [ ] Phase 5: push → CI → artifacts で永続化動作確認
-      - CI 環境では UserDefaults は per-launch で完全初期、保存 → 復元の round trip を
-        直接観測できない可能性が高い。build success / 既存テスト副作用ゼロを確認するに留める
+- [x] Phase 5: push (7cdeef3) → CI → artifacts_035 で確認
+      - build success / install / 起動 / WAV 生成 (3,195,680 bytes = artifacts_029〜034 と完全同サイズ、
+        audio path 副作用ゼロを証明) / crash なし
+      - syslog で起動シーケンス確認: `Mode switched to: sleep` (init 末尾の setMode(initialMode) が
+        動作) → NowPlayingService Remote commands registered → AVAudioEngine offline 開始
+      - CI は per-launch UserDefaults 初期で「未保存 → default 復元」経路のみ確認
+        (round trip は Phase 6 実機検証)
 - [ ] Phase 6 (後続課題, Developer Program 加入後): 実機で実際に再起動してモード / Volume /
       MUTE / Timer が復元されることを確認
