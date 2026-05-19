@@ -1130,5 +1130,10 @@ App Store のアクセシビリティガイドライン準拠を目指し、Voic
       - Low 反映 (Volume rounding): `Int(viewModel.volume * 100)` → `Int((viewModel.volume * 100).rounded())`
       - Low 据え置き: xxLarge 上限 (Accessibility Large 対応は将来 wrap/grid/menu 化検討時に再考)、
         `.accessibilityElement(children: .ignore)` / `Animation?` nil パターンは Codex も妥当判定
-- [ ] Phase 5: push → CI → artifacts で確認 (build success / 既存 screenshot レイアウト維持)
+- [x] Phase 5: push (827f9d8) → CI → artifacts_037 で確認
+      - build success / crash なし / WAV 3,195,680 bytes (artifacts_029〜036 と完全同サイズ、
+        audio path 副作用ゼロ)
+      - screenshot で semantic font 反映確認: タイトル 30→28pt、subtitle 14→15pt 等の微調整、
+        4 voice 横並び / 4 mode 横並び / 6 timer preset 横並びは崩れずレイアウト維持
+      - Dynamic Type 大設定 / VoiceOver / Reduce Motion の挙動は CI 環境では検証不能 (実機 Phase 6)
 - [ ] Phase 6 (後続課題, Developer Program 加入後): 実機で VoiceOver / Reduce Motion / Dynamic Type 大の挙動を実体験で確認
