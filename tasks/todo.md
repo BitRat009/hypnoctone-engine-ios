@@ -1184,9 +1184,16 @@ App Store のアクセシビリティガイドライン準拠を目指し、Voic
       - 反映: 全 Medium はコメントで明示 (BINAURAL preset / applyPreset 内に harmonics の比例差 +
         LFO 微小揺らぎ + generative pitch 再有効化リスクを注記)。Phase 8 で実機聴感確認後に
         harmonics suppression API を追加するかは別途判断
-- [ ] Phase 7: push → CI → artifacts で確認
-      - build success / 既存 4 mode 動作維持 / wave visualizer 描画維持
-      - WAV は SLEEP モードで自動再生 (CI_AUTOSTART は mode を変えないため)、
-        BINAURAL の FFT 検証は実機 Phase 8 に送る
+- [x] Phase 7: push (c9b2a3a → 525a41b) → CI → artifacts_038 / artifacts_039 で確認
+      - artifacts_038: build success / 5 mode grid 表示 OK だが Hypnoctone タイトルが
+        status bar に被る regression が発覚 (5 mode 2 行 grid 化で縦 +56pt 増え画面 usable
+        height 超過)
+      - 修正 (525a41b): spacing 20→16 + padding(.vertical,40)→(.top,12)+(.bottom,24) で
+        total -76pt 圧縮
+      - artifacts_039: タイトル正常描画 / 5 mode grid 綺麗に配置 / 下部 Timer まで全 UI が
+        画面内に収まり regression 解消
+      - WAV 3,195,680 bytes (artifacts_029 以降と完全同サイズ、audio path 副作用ゼロ)
+      - crash なし、SIGTERM 正常終了
 - [ ] Phase 8 (後続課題, Developer Program 加入後): 実機 + ヘッドフォンで BINAURAL の聴感確認、
-      L/R 別 Goertzel で 217.5/222.5Hz peak と 5Hz beat の観測、harmonics suppression 要否判断
+      L/R 別 Goertzel で 217.5/222.5Hz peak と 5Hz beat の観測、harmonics suppression 要否判断、
+      Dynamic Type 大設定での layout 崩れ確認
