@@ -16,7 +16,7 @@ struct MainView: View {
             VStack(spacing: 20) {
                 header
                 Spacer(minLength: 4)
-                PulseView(isActive: viewModel.isPlaying)
+                visualizer
                 Spacer(minLength: 4)
                 statusText
                 modeSelector
@@ -46,6 +46,29 @@ struct MainView: View {
     }
 
     // MARK: - 構成要素
+
+    /// 中央のビジュアルブロック (Task 26)。
+    /// アプリアイコン (wave-plus) と同じモチーフの動的波形 (WaveVisualizerView) を
+    /// 全幅で背景に敷き、その上に既存の PulseView (中央発光ハロー + コア) を重ねる。
+    /// 240pt 高さで縦方向を固定し、上下 Spacer で中央配置する。
+    private var visualizer: some View {
+        ZStack {
+            WaveVisualizerView(
+                isPlaying: viewModel.isPlaying,
+                voiceMuted: voiceMuteByGroup,
+                mode: viewModel.currentMode
+            )
+            PulseView(isActive: viewModel.isPlaying)
+        }
+        .frame(height: 240)
+    }
+
+    /// `viewModel.voiceGroups` を `[VoiceGroup: Bool]` 辞書に変換した MUTE 状態。
+    /// WaveVisualizerView は配列順序依存を避けるため辞書で受け取る設計
+    /// (Codex Task 26 Medium 3 反映)。
+    private var voiceMuteByGroup: [AudioEngineController.VoiceGroup: Bool] {
+        Dictionary(uniqueKeysWithValues: viewModel.voiceGroups.map { ($0.group, $0.isMuted) })
+    }
 
     /// アプリ名と現在モード名。Task 22 で subtitle を `viewModel.currentModeLabel` 動的化
     /// ("Sleep Mode" / "Focus Mode" / "Meditate Mode" / "Relax Mode")。

@@ -911,3 +911,55 @@ App Icon (1024×1024 マスター) と暗背景 Launch Screen を整える。実
         合成 + 完全不透明 RGB に変換 (Apple App Icon ガイドライン準拠で alpha チャネル除去)
       - 旧 Python 生成 `icon-1024.png` および `tools/generate_app_icon.py` は削除
 - [ ] Phase 8 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認
+
+## Task 26 — オーディオビジュアライザー (波形アニメーション)
+
+アプリアイコン (wave-plus) と同じモチーフの動的波形を MainView に表示する。
+Sleep アプリの性質 (画面ロック前提、長時間動作、低消費電力優先) に合わせ、
+リアル audio FFT は使わず、SwiftUI Canvas + TimelineView による
+**時間ベース procedural アニメーション** で「音の雰囲気」を視覚化する。
+
+### 設計
+
+- **時間関数ベース**: `y(x, t) = amp * sin(2π * xCycles * x/W + 2π * timeFreq * t)` で
+  4 voice (TONE / DRONE / SUB / GRAIN) 1 本ずつの sine wave を計 4 本描画
+- **iOS 16+ Canvas + TimelineView(.animation, paused:)** で 60fps 描画 (GPU 加速)
+- **screen lock 中は SwiftUI render 自動停止** = battery 0 (audio はバックグラウンド継続)
+- voice MUTE → 該当 wave 不透明度 0 で fade
+- isPlaying = false → TimelineView を paused + 不透明度低下で消える
+- mode 切替 → global speed の倍率を mode 別に切替
+  (SLEEP: 0.6 / FOCUS: 1.0 / MEDITATE: 0.3 / RELAX: 0.8)
+- Glow effect: 同じ path を blur layer + sharp layer の 2 重描画で発光感を再現
+
+### voice → wave マッピング (空間周波数 / 時間周波数)
+
+| Voice | 物理周波数 | xCycles (空間周波数) | timeFreq (Hz) | 振幅比 | 不透明度 |
+|-------|----------|---------------------|---------------|--------|---------|
+| TONE (E4/A4 等) | 中高 | 1.5 | 0.06 | 0.18 | 0.55 |
+| DRONE (A3) | 中低 | 1.0 | 0.04 | 0.22 | 0.65 |
+| SUB (A1) | 低 | 0.5 | 0.025 | 0.30 | 0.45 |
+| GRAIN (高音 sparkle) | 高 | 2.5 | 0.10 | 0.12 | 0.40 |
+
+### Phase
+
+- [x] Phase 1: `WaveVisualizerView.swift` 新規実装 (Canvas + TimelineView、4 voice 固定、Theme.accent + glow)
+- [x] Phase 2: MainView 側で `viewModel.voiceGroups.map { ($0.group, $0.isMuted) }` で辞書化して WaveVisualizerView に渡す
+      (Codex Medium 3 反映で配列順序依存を排除、`[VoiceGroup: Bool]` 辞書で受ける設計)
+- [x] Phase 3: MainView の PulseView を `visualizer` プロパティ (ZStack + frame 240pt) に置き換え
+- [x] Phase 4: Mode 別 speed multiplier (SLEEP=0.6 / FOCUS=1.0 / MEDITATE=0.3 / RELAX=0.8) を実装
+- [x] Phase 5: Codex クロスレビュー (2 ラウンド)
+      - 1 回目: Critical/High なし、Medium 3 (停止中 TimelineView 継続 / Stop 時位相ジャンプ /
+        voice 配列順序依存) + Low 5 (MUTE fade / blur 負荷 / steps 固定 / 言い切りコメント / 重ね順)
+      - 反映: Medium 1+2 統合対応 — `if isPlaying { TimelineView } else { 静的 Canvas }` で
+        描画スケジュール停止 + `onChange(of: isPlaying)` で `pausedElapsed` 保存して Resume 時に
+        startDate を `Date() - pausedElapsed` にずらすことで位相連続化
+      - 反映: Medium 3 — `voiceMuted: [VoiceGroup: Bool]` 辞書 + waveParams も `[(group, params)]` でペア化
+      - 反映: Low 4 (screen lock 言い切り) — 「SwiftUI 更新頻度が落ちる/止まる expectation」程度に緩めた
+      - 据え置き: Low 1 (MUTE fade) は Canvas closure 内 opacity の animation が API 制約で
+        効かないため Phase 7 実機調整送り、Low 3 (steps=120 固定) も iPad 検証時に再考送り
+      - 2 回目: Medium 1 件残 — Stop 時 `Date()` ベース freeze の微小位相ズレ。Codex 自身が
+        「実害小、ゆっくりした波なら視認リスク低め、許容でよい」と認め、Phase 7 で実機確認時に
+        気になれば対応する後続課題として残置
+- [ ] Phase 6: push → CI → artifacts で screenshot に wave 描画確認 (再生中 frame と停止中 frame の両方で wave 線が描画される)
+- [ ] Phase 7 (後続課題, Developer Program 加入後): 実機で動きの心地よさ確認、視認性 / 速度 / amplitude を調整
+      残課題: Stop 時の微小位相ズレ (Codex Medium、視認リスク低)、MUTE 切替の即時 fade を softer に
