@@ -871,9 +871,23 @@ App Icon (1024×1024 マスター) と暗背景 Launch Screen を整える。実
       - 2 回目: 追加 Low 指摘 (CFBundleIconName が nested CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName に
         入る可能性) を反映、両方を見て fallback する形に変更。最終 OK
 - [x] Phase 5: codemagic.yaml に CFBundleIconName / UILaunchScreen / Assets.car 確認 step 追加
-- [ ] Phase 6: push → CI → artifacts_030 で確認
+- [x] Phase 6 (1st): push (bb21118) → artifacts_030 で **failed**
+      - 失敗 1: `plutil -extract` がエラー時 stdout にもエラー文字列を書く挙動で
+        `2>/dev/null || true` が効かず、ICON_NAME にエラー文字列が入って nested fallback が動かない
+      - 失敗 2: `INFOPLIST_KEY_UILaunchScreen_BackgroundColor = LaunchBackground` が
+        `UIColorName` に展開されず、さらに `_Generation = YES` と併用で `UILaunchScreen = { UILaunchScreen = {} }` という二重ネスト bug-like 出力に
+      - artifacts_030 syslog の plutil -p 出力: `CFBundleIcons~ipad.CFBundlePrimaryIcon.CFBundleIconName = "AppIcon"` (icon 自体は正しく付いている)
+- [x] Pivot (Phase 6.5): 明示 Info.plist へ切り替え
+      - `HypnoctoneEngine/Info.plist` 新規作成、UILaunchScreen / UIBackgroundModes /
+        UIApplicationSceneManifest (UISceneConfigurations = {} 含む) / UISupportedInterfaceOrientations を直書き
+      - pbxproj: GENERATE_INFOPLIST_FILE = NO + INFOPLIST_FILE = HypnoctoneEngine/Info.plist、
+        6 個の INFOPLIST_KEY_* を削除 (ASSETCATALOG_COMPILER_APPICON_NAME は維持)
+      - codemagic.yaml: `if cmd; then` 形式の `get_plist()` 関数化、追加 fail-loud キー
+        (CFBundleIdentifier / ShortVersionString / Version / UIBackgroundModes[0]) を導入
+      - Codex 再レビュー OK (UIApplicationSceneManifest に UISceneConfigurations = {} を含める提案、追加 fail-loud キー提案を反映)
+- [ ] Phase 6 (2nd): push → CI → artifacts_031 で確認
       - build success / crash 無し
-      - Info.plist の CFBundleIconName = AppIcon、UILaunchScreen.UIColorName = LaunchBackground
+      - Info.plist の CFBundleIconName / UILaunchScreen.UIColorName / 各必須キーを fail-loud 通過
       - 01-after-render.png で Launch Screen→MainView 遷移後の暗背景描画 (副作用なし)
-      - WAV は artifacts_029 と同等 (Asset Catalog 追加は audio path に影響しない)
+      - WAV は artifacts_029 と同等 (Asset Catalog + Info.plist 変更は audio path に影響しない)
 - [ ] Phase 7 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認
