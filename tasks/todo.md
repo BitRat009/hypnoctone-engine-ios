@@ -885,9 +885,18 @@ App Icon (1024×1024 マスター) と暗背景 Launch Screen を整える。実
       - codemagic.yaml: `if cmd; then` 形式の `get_plist()` 関数化、追加 fail-loud キー
         (CFBundleIdentifier / ShortVersionString / Version / UIBackgroundModes[0]) を導入
       - Codex 再レビュー OK (UIApplicationSceneManifest に UISceneConfigurations = {} を含める提案、追加 fail-loud キー提案を反映)
-- [ ] Phase 6 (2nd): push → CI → artifacts_031 で確認
+- [x] Phase 6 (2nd): push (d318676) → artifacts_031 で **failed**
+      - エラー: `Multiple commands produce '.../HypnoctoneEngine.app/Info.plist'`
+      - 原因: PBXFileSystemSynchronizedRootGroup (HypnoctoneEngine/) 配下に Info.plist を置いたため
+        Copy Bundle Resources (自動 sync) と ProcessInfoPlistFile (INFOPLIST_FILE 指定) で衝突
+- [x] Pivot (Phase 6.75): PBXFileSystemSynchronizedBuildFileExceptionSet 追加
+      - Codex 推奨案 B (target フォルダ内に Info.plist を維持しつつ exception で Resources から除外)
+      - pbxproj に新規セクション `PBXFileSystemSynchronizedBuildFileExceptionSet` 追加
+        (`membershipExceptions = (Info.plist,)`、target = HypnoctoneEngine)
+      - 既存の `PBXFileSystemSynchronizedRootGroup` (HypnoctoneEngine) に `exceptions` 配列を追加
+- [ ] Phase 6 (3rd): push → CI → artifacts_032 で確認
       - build success / crash 無し
       - Info.plist の CFBundleIconName / UILaunchScreen.UIColorName / 各必須キーを fail-loud 通過
       - 01-after-render.png で Launch Screen→MainView 遷移後の暗背景描画 (副作用なし)
-      - WAV は artifacts_029 と同等 (Asset Catalog + Info.plist 変更は audio path に影響しない)
+      - WAV は artifacts_029 と同等
 - [ ] Phase 7 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認

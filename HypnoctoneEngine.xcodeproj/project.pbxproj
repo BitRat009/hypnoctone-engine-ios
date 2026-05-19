@@ -14,8 +14,25 @@
 		HYPNOCTONE00000000000003 /* HypnoctoneEngine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HypnoctoneEngine.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		HYPNOCTONE000000000000F1 /* Exceptions for "HypnoctoneEngine" folder in "HypnoctoneEngine" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = HYPNOCTONE00000000000007 /* HypnoctoneEngine */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		HYPNOCTONE0000000000000F /* HypnoctoneEngine */ = {isa = PBXFileSystemSynchronizedRootGroup; path = HypnoctoneEngine; sourceTree = "<group>"; };
+		HYPNOCTONE0000000000000F /* HypnoctoneEngine */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				HYPNOCTONE000000000000F1 /* Exceptions for "HypnoctoneEngine" folder in "HypnoctoneEngine" target */,
+			);
+			path = HypnoctoneEngine;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
