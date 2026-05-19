@@ -18,9 +18,13 @@ final class AudioViewModel: ObservableObject {
     @Published private(set) var isPlaying = false
 
     /// マスター音量（0.0〜1.0）。Volume スライダーとバインドする。
+    /// `didSet` で controller への反映 + SettingsStore への保存 (Task 27、永続化)。
+    /// 注意: `didSet` は init 内での代入では走らないため、init で `SettingsStore` から
+    /// 読んだ初期値の controller / store 反映は別途明示的に行う。
     @Published var volume: Double = 0.5 {
         didSet {
             controller.setVolume(Float(volume))
+            SettingsStore.shared.volume = volume
         }
     }
 
@@ -98,9 +102,24 @@ final class AudioViewModel: ObservableObject {
     /// 直接呼ぶとコンパイルエラーになる。引数を Optional にしておき、init 本体
     /// （MainActor 隔離下）で生成することでこの制約を回避する。
     init(controller: AudioEngineController? = nil) {
-        let resolved = controller ?? AudioEngineController()
+        // Task 27: 永続化されたユーザー設定を起動時に復元する。
+        let store = SettingsStore.shared
+
+        // controller の初期 Mode / MUTE に永続値を反映 (引数で controller が注入される
+        // テストケースでは初期値は呼び出し側の責務、ここでは新規生成時のみ store から反映)。
+        let resolved = controller ?? AudioEngineController(
+            initialMode: store.mode,
+            initialMutedGroups: store.mutedGroups
+        )
         self.controller = resolved
-        resolved.setVolume(Float(volume))
+
+        // volume / sleepTimerMinutes も永続値を初期化。
+        // 注意: @Published プロパティへの init 内代入は didSet を発火しないため、
+        // controller への volume 反映と SettingsStore への保存は別途明示する。
+        // 保存はそもそも store から読んだ値を書き戻すだけで副作用ゼロなので省略。
+        self.volume = store.volume
+        self.sleepTimerMinutes = store.sleepTimerMinutes
+        resolved.setVolume(Float(store.volume))
 
         // controller の @Published 変化 (currentDroneNotes 等) を ViewModel にも forward。
         // これで MainView の musicInfo (droneNoteNames を読む) が generative pitch 変化を
@@ -172,6 +191,7 @@ final class AudioViewModel: ObservableObject {
     func toggleMute(_ group: AudioEngineController.VoiceGroup) {
         let next = !controller.isMuted(group)
         controller.setMuted(group, next)
+        SettingsStore.shared.setMuted(group, next)  // Task 27: 永続化
         objectWillChange.send()
     }
 
@@ -213,6 +233,7 @@ final class AudioViewModel: ObservableObject {
     /// Task 24: Lock screen の artist 表記もモード名に追従させる。
     func setMode(_ mode: Mode) {
         if controller.setMode(mode) {
+            SettingsStore.shared.mode = mode  // Task 27: 永続化
             objectWillChange.send()
             // モード切替は Stop 状態のみ可能 (Task 21 設計) なので isPlaying=false で publish。
             nowPlayingService.updateNowPlaying(isPlaying: false, modeLabel: currentModeLabel)
@@ -228,6 +249,7 @@ final class AudioViewModel: ObservableObject {
     func setSleepTimer(minutes: Int?) {
         guard sleepTimerMinutes != minutes else { return }
         sleepTimerMinutes = minutes
+        SettingsStore.shared.sleepTimerMinutes = minutes  // Task 27: 永続化
         if isPlaying {
             if let mins = minutes {
                 startSleepTimerCountdown(totalSeconds: mins * 60)

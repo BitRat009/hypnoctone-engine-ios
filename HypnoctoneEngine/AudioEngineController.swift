@@ -252,10 +252,16 @@ final class AudioEngineController: ObservableObject {
     ///   Task 18 で sub bass voice (A1) を追加して ATMÓS 的な重心の低い空間を作る。
     /// - Parameter scale: 音階。既定は A Major Pentatonic。
     /// - Parameter mode: 動作モード。`nil` のとき環境変数 `CI_AUTOSTART` の有無で自動判定。
+    /// - Parameter initialMode: 起動時の Mode (SLEEP/FOCUS/MEDITATE/RELAX)。Task 27 で
+    ///   `SettingsStore` 由来の永続値を受け取れるよう追加。デフォルトは `.sleep` で既存挙動互換。
+    /// - Parameter initialMutedGroups: 起動時の voice MUTE 状態。Task 27 で永続値を渡せるよう追加。
+    ///   空辞書 (default) なら全 voice unmute (既存挙動互換)。`true` の voice のみ MUTE 適用する。
     init(
         rootNote: Note = Note(name: "A3") ?? Note(midiNumber: 57),
         scale: Scale = .majorPentatonic,
-        mode: EngineMode? = nil
+        mode: EngineMode? = nil,
+        initialMode: Mode = .sleep,
+        initialMutedGroups: [VoiceGroup: Bool] = [:]
     ) {
         // Task 18 で sub voice を rootNote - 24 semitone (= 2 オクターブ下) に置くため、
         // rootNote.midiNumber は最低でも 24 (= C0) 以上である必要がある。default A3 (57) は満たす。
@@ -476,6 +482,21 @@ final class AudioEngineController: ObservableObject {
         }
 
         buildAudioGraph()
+
+        // Task 27: 保存設定の復元。
+        // `setMode` は isRunning ガードを持つが init 直後は engine 未起動なので確実に通る。
+        // `.sleep` (default) なら currentMode 初期値と一致し applyPreset の amp 書き戻しが
+        // 冗長になるだけで副作用なし。`.focus / .meditate / .relax` の場合は全 generator amp +
+        // reverb wetDryMix が preset 値に更新される。
+        setMode(initialMode)
+
+        // MUTE 状態の復元: true の voice のみ setMuted(true) を呼ぶ。false は generator
+        // のデフォルト (unmute) と同じなので呼ばなくてよい。
+        for group in VoiceGroup.allCases {
+            if initialMutedGroups[group] == true {
+                setMuted(group, true)
+            }
+        }
     }
 
     // MARK: - 再生制御

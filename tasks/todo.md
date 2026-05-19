@@ -980,3 +980,44 @@ Sleep アプリの性質 (画面ロック前提、長時間動作、低消費電
 - [ ] Phase 7 (後続課題, Developer Program 加入後): 実機で動きの心地よさ確認、視認性 / 速度 / amplitude を調整
       残課題: Stop 時の微小位相ズレ (Codex Medium、視認リスク低)、MUTE 切替の即時 fade を softer に、
       各 modulation 周波数 (A: 0.04Hz / B: timeFreq 0.6 倍 / C: 0.03Hz) と振幅 depth (0.20 / 0.30 / 0.04) の聴感調整
+
+## Task 27 — 設定の永続化 (UserDefaults)
+
+アプリ再起動後に「前回のモード / Volume / 各 voice MUTE / Sleep Timer 選択値」を復元する。
+これまで毎回 SLEEP / Volume 0.5 / 全 voice unmute / Timer Off に戻っていた状態を解消し、
+ユーザーが好みの設定を維持できるようにする (Sleep アプリとして重要な UX)。
+
+### 設計
+
+- **永続化対象**: mode (String rawValue) / volume (Double, 0.0〜1.0 clamp) / muted per voice
+  (Bool x4) / sleepTimerMinutes (Int? sentinel -1 で nil 表現)
+- **永続化しないもの**: sleepTimerRemainingSeconds (現在実行中のカウントダウン残り秒、セッション限定)
+- **UserDefaults キー**: `"com.hypnoctone.settings.*"` プレフィックスで一元化
+- **invalid 値への耐性**: `Mode(rawValue:)` 失敗 / 数値範囲外 / 未保存ケースで default に
+  fallback、起動クラッシュなし
+- **書き込みタイミング**: 各 setter (volume.didSet / toggleMute / setMode / setSleepTimer)
+  で即時 SettingsStore へ反映
+- **読み込みタイミング**: AudioViewModel.init で store から読んで controller (initialMode /
+  initialMutedGroups 引数経由) と内部状態 (volume / sleepTimerMinutes) に反映
+
+### Phase
+
+- [x] Phase 1: `SettingsStore.swift` 新規実装 (@MainActor、テスト時 UserDefaults 注入可能)
+- [x] Phase 2: AudioEngineController init に `initialMode` / `initialMutedGroups` パラメータ追加
+      - init 末尾 (buildAudioGraph 後) で `setMode(initialMode)` + 該当 voice の `setMuted(group, true)`
+      - default 引数で既存挙動互換
+- [x] Phase 3: AudioViewModel が SettingsStore から読み書き
+      - init で store の mode / muted / volume / sleepTimerMinutes を読み、controller に渡す + 内部 state 反映
+      - volume.didSet / toggleMute / setMode / setSleepTimer の各 setter で SettingsStore へ即時保存
+- [x] Phase 4: Codex クロスレビュー
+      - Critical/High なし、Medium 1 (sleepTimerMinutes allowlist 検証不足) + Low 2 (controller 注入時の非対称 / @MainActor 妥当性)
+      - Medium 1 反映: `SettingsStore.sleepTimerMinutes` getter で preset allowlist `{15,30,45,60,90}` に
+        含まれない値は nil fallback、`-2` 等の不正値や preset 外 timer が動く UX 矛盾を防ぐ
+      - Low 1 据え置き: controller 注入時の Mode/MUTE 非対称は「現状規模なら shared で許容」と
+        Codex も認め、DI 化は将来テスト拡充時に再検討
+      - Low 2 据え置き: `@MainActor` 限定は妥当 (UI/ViewModel 経由限定の設計と整合)
+- [ ] Phase 5: push → CI → artifacts で永続化動作確認
+      - CI 環境では UserDefaults は per-launch で完全初期、保存 → 復元の round trip を
+        直接観測できない可能性が高い。build success / 既存テスト副作用ゼロを確認するに留める
+- [ ] Phase 6 (後続課題, Developer Program 加入後): 実機で実際に再起動してモード / Volume /
+      MUTE / Timer が復元されることを確認
