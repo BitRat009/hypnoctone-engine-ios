@@ -42,3 +42,10 @@ secrets/
 
 # Codemagic からダウンロードしたアーティファクトを保管するローカル作業領域
 Codemagic/
+
+# 開発者ローカルのスクリーンショット作業領域
+ss/
+
+# Claude Code のローカル個人設定 (チーム共有しない)
+# settings.json (チーム共有) は track 対象。settings.local.json は除外。
+.claude/settings.local.json

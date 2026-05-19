@@ -903,4 +903,11 @@ App Icon (1024×1024 マスター) と暗背景 Launch Screen を整える。実
       - syslog で Task 24 NowPlayingService の Remote commands 登録 + setNowPlayingInfo (Title=Hypnoctone) を確認
       - offline render frames: 797896 ≒ 18.09 秒、artifacts_029 と同等 (audio path 影響なし)
       - 終了は SIGTERM (正常 kill)
-- [ ] Phase 7 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認
+- [x] Phase 7: AppIcon を Python 生成 → ユーザー指定の手書きアート (wave-plus) へ差し替え
+      - Codex の Low 1 指摘 (Python 生成の暗背景 + 中央発光は Settings 等の縮小サイズで識別性が弱い) を受け、
+        ユーザーが波形モチーフ (sleep wave) の手書きアイコンを別途用意
+      - ファイル: `HypnoctoneEngine/Assets.xcassets/AppIcon.appiconset/hypnoctone-app-icon-1024.png` (1024×1024 RGB)
+      - 元 PNG は RGBA (alpha min=219, max=255) だったため Theme.backgroundBottom (sRGB 0.02/0.02/0.05) に
+        合成 + 完全不透明 RGB に変換 (Apple App Icon ガイドライン準拠で alpha チャネル除去)
+      - 旧 Python 生成 `icon-1024.png` および `tools/generate_app_icon.py` は削除
+- [ ] Phase 8 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認
