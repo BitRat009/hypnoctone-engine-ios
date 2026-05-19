@@ -971,6 +971,12 @@ Sleep アプリの性質 (画面ロック前提、長時間動作、低消費電
         理論上 frame 外に 0.008H (≒1.9pt @240) はみ出し可能性、glow blur 6 の端切れ懸念
       - 反映: `effectiveHeight = size.height * 0.92` 導入で上下に 4% padding 確保、
         最大振幅 0.468 * 0.92 * H + 0.04 * H ≒ 0.471H で frame 内に確実に収まる
-- [ ] Phase 6: push → CI → artifacts で screenshot に wave 描画確認 (再生中 frame と停止中 frame の両方で wave 線が描画される)
+- [x] Phase 6: push (81bcfaf / 2d50cbe) → CI → artifacts_033 / artifacts_034 で確認
+      - artifacts_033 (横スライドのみ版): wave 4 本 + glow 描画 OK だが「上下うねり」感が弱い旨ユーザーフィードバック
+      - artifacts_034 (3 種 modulation 追加版): 波形が時間で変形してうねる / 全体が slow に上下にゆれる
+        状態を確認、ユーザー所感「いいんじゃないかな」で承認
+      - build success / crash なし / WAV 3.2MB (audio path 副作用ゼロ、artifacts_029 以降と同等)
+      - Stop 状態でも 静的 Canvas で位相 freeze + 不透明度 0.3 倍で淡く残る (設計通り)
 - [ ] Phase 7 (後続課題, Developer Program 加入後): 実機で動きの心地よさ確認、視認性 / 速度 / amplitude を調整
-      残課題: Stop 時の微小位相ズレ (Codex Medium、視認リスク低)、MUTE 切替の即時 fade を softer に
+      残課題: Stop 時の微小位相ズレ (Codex Medium、視認リスク低)、MUTE 切替の即時 fade を softer に、
+      各 modulation 周波数 (A: 0.04Hz / B: timeFreq 0.6 倍 / C: 0.03Hz) と振幅 depth (0.20 / 0.30 / 0.04) の聴感調整
