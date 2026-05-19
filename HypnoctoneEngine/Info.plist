@@ -20,6 +20,12 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Task 32: Export Compliance 自動化 (Codex Low 反映)。
+	     Hypnoctone は HTTPS 通信も独自暗号も使用しないため、App Store Connect で
+	     "Missing Compliance" 警告が出ないよう Info.plist で明示的に "暗号化なし" を宣言。
+	     これにより TestFlight build の Export Compliance の手動回答ステップを省略できる。 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

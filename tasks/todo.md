@@ -1255,3 +1255,54 @@ beat (θ-α 境界) を複合した「単音より聞いていられる」低周
 - [ ] Phase 8 (後続課題, Developer Program 加入後): 実機で GROUNDING の聴感確認、
       G2(~98Hz) と 6Hz binaural の複合効果を聴感で確認、SUB voice の UI 表示が
       "G2" に切り替わることを確認
+
+## Task 32 — TestFlight 配信パイプライン
+
+Apple Developer Program 加入後の TestFlight 配信を Codemagic で完結させる
+(Mac 不要、ブラウザと Codemagic のみで iPhone install まで到達)。ADP 加入待ちの間に
+codemagic.yaml 雛形 + setup ドキュメントを準備しておく。
+
+### 設計
+
+- 既存 `ios-simulator-preview` workflow (main push で UI/音検証) はそのまま維持
+- 新規 `ios-testflight-release` workflow を追加:
+  - trigger: `release-v*` tag push で発火 (main push では trigger しない)
+  - macOS image: `mac_mini_m2` (free tier 維持)
+  - Xcode 16.4
+  - integrations: Codemagic UI で設定する App Store Connect integration を参照
+  - ios_signing: `distribution_type: app_store` で Codemagic が自動 fetch
+  - scripts: signing fetch → build number 自動増加 → archive → IPA upload
+  - publishing: `app_store_connect` で TestFlight に自動配信
+- ADP 加入後にユーザーが手動で設定する項目:
+  - App Store Connect で App 作成 (Bundle ID `com.hypnoctone.HypnoctoneEngine` 予約)
+  - App Store Connect API キー発行 (.p8 + Key ID + Issuer ID)
+  - Codemagic UI で integration 設定
+  - pbxproj の `DEVELOPMENT_TEAM` を Team ID で更新 (もしくは Codemagic xcargs 経由)
+
+### Phase
+
+- [x] Phase 1: `codemagic.yaml` に `ios-testflight-release` workflow 雛形追加
+      (integration 名 `HypnoctoneAppStoreConnect`、APP_APPLE_ID placeholder、
+       `release-v*` tag trigger、testFlightInternalTestingOnly export option)
+- [x] Phase 2: `docs/setup-testflight.md` 作成 — 8 ステップ + signing identities セットアップ +
+      Internal Testing 説明 + トラブルシューティング (Bundle ID 予約 / signing エラー /
+      agvtool 失敗 / TestFlight 未出現 / Export Compliance)
+- [x] Phase 3: Codex クロスレビュー
+      - Critical なし、High 2 (signing identities 手順不足 / Internal only export option) +
+        Medium 4 (APP_APPLE_ID placeholder guard / build number fetch failure 警告 /
+        beta_groups 省略 / DEVELOPMENT_TEAM 明示) + Low 4 (VERSIONING_SYSTEM /
+        ITSAppUsesNonExemptEncryption / dSYM path / workflow 競合)
+      - 反映: codemagic.yaml に APP_APPLE_ID validation step 追加、build number 取得失敗時
+        の警告ログ強化、`--custom-export-options='{"testFlightInternalTestingOnly": true}'` を
+        build-ipa に追加、beta_groups をコメント化 (account holder automatic Internal Tester
+        前提)、Info.plist に `ITSAppUsesNonExemptEncryption = false` を追加 (Export Compliance
+        自動化)、docs に Code signing identities セクション + agvtool トラブルシューティング追加
+      - Low 据え置き: VERSIONING_SYSTEM は CI 初回で失敗したら追加対応、dSYM path は
+        初回結果見て調整
+- [ ] Phase 4 (ADP 加入後、ユーザー作業): 上記 setup-testflight.md に従って App Store Connect /
+      Codemagic を設定、Team ID を pbxproj に反映
+- [ ] Phase 5 (ADP 加入後): `release-v0.1.0` tag を push → CI 発火 → TestFlight に upload →
+      iPhone で TestFlight アプリから install して動作確認
+- [ ] Phase 6 (TestFlight install 後): 残っている全 Phase 8 後続課題を実機検証で一気消化
+      (Background playback / Lock screen / AppIcon / Wave / 設定 / Onboarding / Accessibility /
+      BINAURAL / GROUNDING の聴感)

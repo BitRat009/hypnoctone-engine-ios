@@ -592,3 +592,141 @@ workflows:
       - artifacts/*.log
       - artifacts/crash/**/*
       - build/Logs/**/*.log
+
+  # ========================================================================
+  # Task 32: TestFlight 配信パイプライン (ADP 加入後に有効化)
+  # ========================================================================
+  # 前提:
+  #  1. Apple Developer Program 加入完了 (個人 $99/年)
+  #  2. App Store Connect で App 作成 (Bundle ID `com.hypnoctone.HypnoctoneEngine` 予約)
+  #  3. App Store Connect API キー発行 (.p8 + Key ID + Issuer ID)
+  #  4. Codemagic UI > Teams > Integrations > Apple Developer Portal で
+  #     "HypnoctoneAppStoreConnect" という名前で integration を追加し、上記 API キー情報を登録
+  #  5. (オプション) Codemagic UI > Teams > Apple Developer Portal で
+  #     "Hypnoctone Apple Developer" 名で certificates 用 integration も追加
+  #
+  # トリガー: `release-v*` tag push で発火 (例: `release-v0.1.0`)
+  # 既存 `ios-simulator-preview` workflow とは独立しており、main push では trigger されない。
+  #
+  # 詳細は `docs/setup-testflight.md` 参照。
+  ios-testflight-release:
+    name: iOS TestFlight Release
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    # Codemagic UI で設定済みの integration を参照する。
+    # `auth: integration` を publishing 側で使うために必要。
+    # 名前は Codemagic UI 側で命名したものを正確に書く (大文字小文字含めて一致が必要)。
+    integrations:
+      app_store_connect: HypnoctoneAppStoreConnect
+
+    environment:
+      xcode: 16.4
+      # Codemagic の ios_signing 機能で自動 signing。
+      # distribution_type: app_store で App Store / TestFlight 用 provisioning profile を fetch する。
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.hypnoctone.HypnoctoneEngine
+      vars:
+        XCODE_PROJECT: "HypnoctoneEngine.xcodeproj"
+        XCODE_SCHEME: "HypnoctoneEngine"
+        # App Store Connect での App ID (numeric)。
+        # ADP 加入後に App Store Connect で App を作成すると自動採番される。
+        # ここは `docs/setup-testflight.md` の手順で取得した値で更新。
+        # Codemagic UI の Environment variables 側で `APP_APPLE_ID` を上書きしても可。
+        APP_APPLE_ID: "0000000000"  # placeholder, ADP 加入後に上書き
+
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: 'release-v*'
+          include: true
+
+    scripts:
+      - name: Show toolchain
+        script: |
+          set -euo pipefail
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Validate APP_APPLE_ID
+        # placeholder のまま release tag を push すると build number 取得が 0 fallback になり、
+        # その後 upload が失敗する。雛形値で進めるのを早期に止める (Codex Task 32 Medium 反映)。
+        script: |
+          set -euo pipefail
+          if [ "$APP_APPLE_ID" = "0000000000" ] || [ -z "${APP_APPLE_ID:-}" ]; then
+            echo "FAIL: APP_APPLE_ID is placeholder or empty."
+            echo "  → Set it to the numeric App Apple ID (from App Store Connect URL) in"
+            echo "    codemagic.yaml vars.APP_APPLE_ID or Codemagic UI Environment variables."
+            exit 1
+          fi
+          echo "OK: APP_APPLE_ID=$APP_APPLE_ID"
+
+      - name: Fetch signing files
+        # Codemagic の CLI tool `xcode-project use-profiles` が
+        # integration 経由で provisioning profile / certificate を fetch し、
+        # ~/Library/MobileDevice/Provisioning\ Profiles/ と Keychain に展開する。
+        # automatic signing が pbxproj 側で有効 (CODE_SIGN_STYLE = Automatic) なので
+        # xcodebuild が自動的に対応 profile を選ぶ。
+        #
+        # 前提: Codemagic UI > Code signing identities で Apple Distribution certificate と
+        # App Store provisioning profile が integration 経由で fetch 可能な状態 (詳細は
+        # docs/setup-testflight.md ステップ 3.5)。
+        script: |
+          set -euo pipefail
+          xcode-project use-profiles
+
+      - name: Increment build number
+        # CFBundleVersion (CURRENT_PROJECT_VERSION) を直近の TestFlight build より +1 にする。
+        # 同じ build number を 2 回 upload すると App Store Connect が reject するため必須。
+        # API 取得失敗時の 0 fallback は「初回 build」想定だが、認証ミス / App ID 間違いも
+        # 同じ 0 になり気付きにくい。失敗時に明示警告を出す (Codex Task 32 Medium 反映)。
+        script: |
+          set -euo pipefail
+          if LATEST="$(app-store-connect get-latest-app-store-build-number "$APP_APPLE_ID" 2>&1)"; then
+            echo "Latest TestFlight build: $LATEST"
+          else
+            echo "WARN: Failed to fetch latest build number (output: $LATEST). Assuming first build (LATEST=0)."
+            echo "  → If this is NOT your first build, check APP_APPLE_ID, API key credentials,"
+            echo "    and that the App Store Connect integration is correctly configured in Codemagic UI."
+            LATEST=0
+          fi
+          NEXT="$((LATEST + 1))"
+          echo "Next build number: $NEXT"
+          cd "$CM_BUILD_DIR"
+          agvtool new-version -all "$NEXT"
+
+      - name: Build IPA for App Store
+        # `xcode-project build-ipa` で archive → export を一括実行。
+        # signing は Fetch signing files で展開済み profile を使う。
+        # `testFlightInternalTestingOnly: true` で Apple beta review を回避し、
+        # account holder + Internal Testing Group のみに即時配信 (Codex Task 32 High 反映)。
+        script: |
+          set -euo pipefail
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME" \
+            --custom-export-options='{"testFlightInternalTestingOnly": true}'
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/ios/xcarchive/**/*.dSYM.zip
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        # `auth: integration` で `integrations.app_store_connect` の API キーを使う。
+        # 個別の API key を環境変数で渡す代わりに、Codemagic UI で一元管理できる。
+        auth: integration
+        # Apple Review なし即時配信。account holder は automatic に Internal Tester になるため、
+        # 別途 Internal Testing Group を作らなくても自分の iPhone で TestFlight install 可能。
+        # 明示的に beta_groups を指定したい場合は下のコメントを解除し、App Store Connect の
+        # TestFlight タブで同名 Group を事前作成すること (Codex Task 32 Medium 反映で
+        # 雛形では省略、必要なら後から追加)。
+        submit_to_testflight: true
+        # beta_groups:
+        #   - Internal
+        # External testing (Apple Review あり、1-2 日) は後日 submit_to_app_store と
+        # 組み合わせて使う想定。初期は internal のみ。
+        # submit_to_app_store: false  # default false なので明示不要
