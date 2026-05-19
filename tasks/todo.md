@@ -1025,3 +1025,46 @@ Sleep アプリの性質 (画面ロック前提、長時間動作、低消費電
         (round trip は Phase 6 実機検証)
 - [ ] Phase 6 (後続課題, Developer Program 加入後): 実機で実際に再起動してモード / Volume /
       MUTE / Timer が復元されることを確認
+
+## Task 28 — Onboarding 画面 (初回起動時のみ)
+
+App Store 提出後の初回ユーザー向けに、アプリの位置付け / 4 モード / Lock screen 連携 /
+Sleep Timer / Volume の使い方を簡潔に伝える Onboarding 画面を実装する。完了したフラグを
+UserDefaults に永続化し、2 回目以降の起動では MainView 直接表示。
+
+### 設計
+
+- **トリガ**: 初回起動のみ。`SettingsStore.hasCompletedOnboarding == false` の時表示
+- **UI**: TabView + PageTabViewStyle の 3 ページスワイプ形式。各ページにタイトル / サブタイトル
+  / 説明文 / 簡易ビジュアル
+- **ナビゲーション**: 右上 Skip ボタン (どこからでも完了可) / 下部 Next ボタン (最終ページで
+  "Get Started" に変化、tap で `onComplete()`)
+- **デザイン**: 本体と同じ Theme (backgroundGradient / accent)、控えめな配色 (Sleep アプリの
+  「眩しくない」設計を踏襲)
+- **CI 互換**: `CI_AUTOSTART` 環境変数があるときは onboarding をスキップして MainView 直行
+  (既存 CI フローを破壊しない)
+- **永続化**: `SettingsStore.hasCompletedOnboarding` (Bool、未保存 = false default)
+
+### ページ構成
+
+1. **Welcome**: "Hypnoctone" タイトル + "Ambient audio for sleep, focus & rest" + アプリ概要
+2. **4 つのモード**: SLEEP / FOCUS / MEDITATE / RELAX のリスト + 各モードの音響特徴一文
+3. **便利な機能**: Sleep Timer / Lock Screen 操作 / Background playback の説明
+
+### Phase
+
+- [x] Phase 1: `SettingsStore.hasCompletedOnboarding` プロパティ追加 (`bool(forKey:)` の未保存 false 挙動を利用)
+- [x] Phase 2: `OnboardingView.swift` 新規実装 (TabView 3 ページ、Skip/Next ボタン、Theme 反映、
+      SF Symbols: waveform / circle.grid.2x2 / moon.zzz)
+- [x] Phase 3: `HypnoctoneEngineApp.swift` を書き換え、`OnboardingState` ObservableObject で分岐
+      (`CI_AUTOSTART` 環境変数あり時は強制 MainView 直行、SettingsStore は汚さない設計)
+- [x] Phase 4: Codex クロスレビュー
+      - Critical/High なし、Medium 1 (2 ページ目本文が iPhone SE / Dynamic Type 大で詰まる懸念) +
+        Low 4 (@StateObject 初期化 / CI skip 判断 / accessibility hint / SettingsStore.shared 直参照)
+      - Medium 反映: 本文を `ScrollView(showsIndicators: false)` で包んで小画面 / Dynamic Type 大に対応
+      - Low 反映 (accessibility hint): Next ボタンに "Shows the next onboarding page"、
+        Get Started ボタンに "Opens the main player" の hint 追加
+      - Low 据え置き: SettingsStore.shared 直参照は現状規模で許容、テスト拡充時に DI 検討
+- [ ] Phase 5: push → CI → artifacts で確認 (CI_AUTOSTART 起動時に MainView が出ること = 既存挙動維持)
+- [ ] Phase 6 (後続課題, Developer Program 加入後): 実機で初回起動 → onboarding → Get Started →
+      MainView → アプリ再起動で MainView 直行 の round trip を確認

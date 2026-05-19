@@ -37,6 +37,9 @@ final class SettingsStore {
         /// Sleep Timer 分。`-1` は "Off (nil)" を意味する sentinel。
         /// UserDefaults は `Int?` を直接保存できないため。
         static let sleepTimerMinutes = "com.hypnoctone.settings.sleepTimerMinutes"
+        /// Onboarding 画面を一度完了したかどうか (Task 28)。
+        /// 未保存 = false (初回起動なので onboarding を表示)。
+        static let hasCompletedOnboarding = "com.hypnoctone.settings.hasCompletedOnboarding"
     }
 
     private let defaults: UserDefaults
@@ -130,4 +133,12 @@ final class SettingsStore {
     /// nil/Off を除いたもの)。getter の validation に使う。
     /// `AudioViewModel` 側の preset 配列を変えるときはこちらも揃えること。
     private static let allowedPresetMinutes: Set<Int> = [15, 30, 45, 60, 90]
+
+    /// Onboarding 画面を一度完了したかどうか (Task 28)。
+    /// 未保存なら false (= 初回起動なので onboarding 表示)。
+    /// `bool(forKey:)` は未保存時 false を返すので、これがそのまま default として機能する。
+    var hasCompletedOnboarding: Bool {
+        get { defaults.bool(forKey: Keys.hasCompletedOnboarding) }
+        set { defaults.set(newValue, forKey: Keys.hasCompletedOnboarding) }
+    }
 }
