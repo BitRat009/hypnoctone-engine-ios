@@ -169,9 +169,24 @@ struct WaveVisualizerView: View {
         )
     }
 
-    /// `y(x, t) = centerY + amplitude * sin(2π * xCycles * x/W + 2π * timeFreq * t * speedMult)`
-    /// で 1 本の sine wave を Path に展開する。steps=120 でビュー幅に対する解像度を確保。
-    /// 解像度を上げ過ぎると CPU 負荷が増えるが、120 ステップなら 60fps でも余裕。
+    /// 1 本の sine wave を Path に展開する。Task 26 Option 1 で 3 種の modulation を追加:
+    ///
+    /// (A) **振幅 LFO**: `amplitudeLFO = 1.0 + 0.20 * sin(2π * 0.04 * t + voicePhase)`
+    ///     25 秒周期で 0.8〜1.2 倍に呼吸させる。voice ごとに `xCycles` を位相シードに使い
+    ///     完全同期しないようずらす。
+    /// (B) **進行速度違いの第 2 sine 加算**: 主 sine に対して空間周波数 1.7 倍 / 時間周波数
+    ///     0.6 倍 + 位相 1.3rad オフセットの second sine (係数 0.30) を加える。合成波が場所と
+    ///     時間で複雑に変形し「うねり」が生まれる。
+    /// (C) **垂直オフセット LFO**: 全 wave 共通の `verticalOffset = 0.04 * H * sin(2π * 0.03 * t)`
+    ///     で 33 秒周期で全体が slow に上下する。
+    ///
+    /// 合成振幅 = `amplitudeRatio * effectiveHeight * amplitudeLFO * (primary + 0.30 * secondary)`
+    /// で最大 `amplitudeRatio * 1.2 * 1.3 = 1.56 * amplitudeRatio`。SUB (0.30) で最大 `0.468 * effectiveH`。
+    /// `verticalOffset` (`0.04 * H` 上限) を加算しても `0.468 * 0.92 * H + 0.04 * H = 0.471H` で
+    /// `0.5H` を下回り、frame 内に確実に収まる + glow blur (radius 6) の端切れも回避できる
+    /// (Codex Task 26 Medium 反映、size.height * 0.92 の effective padding を導入)。
+    ///
+    /// steps=120 でビュー幅に対する解像度を確保 (60fps で余裕)。
     private func makeWavePath(
         size: CGSize,
         params: WaveParams,
@@ -181,13 +196,35 @@ struct WaveVisualizerView: View {
         var path = Path()
         let steps = 120
         let centerY = size.height / 2
+        // 上下に 4% padding を確保して、振幅最大時 + verticalOffset でも frame 外に
+        // はみ出さないようにする。glow blur radius 6 の端切れも防ぐ。
+        let effectiveHeight = size.height * 0.92
         let timePhase = 2.0 * .pi * params.timeFreq * t * speedMult
+
+        // (A) 振幅 LFO: voice ごとに位相シードずらしで完全同期回避
+        let ampLFOPhase = 2.0 * .pi * 0.04 * t + params.xCycles
+        let amplitudeLFO = 1.0 + 0.20 * sin(ampLFOPhase)
+
+        // (C) 垂直オフセット LFO: 全 wave 共通で slow に上下に揺れる
+        let verticalOffset = 0.04 * size.height * sin(2.0 * .pi * 0.03 * t)
 
         for i in 0...steps {
             let normalizedX = Double(i) / Double(steps)
             let x = size.width * normalizedX
             let spatialPhase = normalizedX * (2.0 * .pi * params.xCycles)
-            let y = centerY + params.amplitudeRatio * size.height * sin(spatialPhase + timePhase)
+
+            // 主 sine (進行波)
+            let primary = sin(spatialPhase + timePhase)
+
+            // (B) 進行速度違いの第 2 sine (うねり感を作る)
+            let secondarySpatial = normalizedX * (2.0 * .pi * params.xCycles * 1.7)
+            let secondaryTime = 2.0 * .pi * params.timeFreq * 0.6 * t * speedMult
+            let secondary = 0.30 * sin(secondarySpatial + secondaryTime + 1.3)
+
+            let y = centerY
+                + verticalOffset
+                + params.amplitudeRatio * effectiveHeight * amplitudeLFO * (primary + secondary)
+
             let point = CGPoint(x: x, y: y)
             if i == 0 {
                 path.move(to: point)

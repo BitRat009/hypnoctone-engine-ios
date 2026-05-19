@@ -960,6 +960,17 @@ Sleep アプリの性質 (画面ロック前提、長時間動作、低消費電
       - 2 回目: Medium 1 件残 — Stop 時 `Date()` ベース freeze の微小位相ズレ。Codex 自身が
         「実害小、ゆっくりした波なら視認リスク低め、許容でよい」と認め、Phase 7 で実機確認時に
         気になれば対応する後続課題として残置
+- [x] Phase 5.5: 波形を「横スライドのみ」から「上下にうねる動的波」へ進化 (ユーザー Option 1 選択)
+      - (A) 振幅 LFO: `amplitudeLFO = 1.0 + 0.20 * sin(2π * 0.04 * t + voicePhase)` で
+        25 秒周期の呼吸感、voice 毎に xCycles を位相シードに使って完全同期回避
+      - (B) 進行速度違いの第 2 sine 加算: 主 sine に xCycles 1.7 倍 + timeFreq 0.6 倍 +
+        位相 1.3rad オフセットの second sine (係数 0.30) を加えて波形が時間で変形 (うねり)
+      - (C) 垂直オフセット LFO: 全 wave 共通 `verticalOffset = 0.04 * H * sin(2π * 0.03 * t)`
+        で 33 秒周期で全体が slow に上下に揺れる
+      - Codex 数式 sanity check (3 回目): Medium 1 件 — SUB 最大振幅 + verticalOffset で
+        理論上 frame 外に 0.008H (≒1.9pt @240) はみ出し可能性、glow blur 6 の端切れ懸念
+      - 反映: `effectiveHeight = size.height * 0.92` 導入で上下に 4% padding 確保、
+        最大振幅 0.468 * 0.92 * H + 0.04 * H ≒ 0.471H で frame 内に確実に収まる
 - [ ] Phase 6: push → CI → artifacts で screenshot に wave 描画確認 (再生中 frame と停止中 frame の両方で wave 線が描画される)
 - [ ] Phase 7 (後続課題, Developer Program 加入後): 実機で動きの心地よさ確認、視認性 / 速度 / amplitude を調整
       残課題: Stop 時の微小位相ズレ (Codex Medium、視認リスク低)、MUTE 切替の即時 fade を softer に
