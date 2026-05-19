@@ -894,9 +894,13 @@ App Icon (1024×1024 マスター) と暗背景 Launch Screen を整える。実
       - pbxproj に新規セクション `PBXFileSystemSynchronizedBuildFileExceptionSet` 追加
         (`membershipExceptions = (Info.plist,)`、target = HypnoctoneEngine)
       - 既存の `PBXFileSystemSynchronizedRootGroup` (HypnoctoneEngine) に `exceptions` 配列を追加
-- [ ] Phase 6 (3rd): push → CI → artifacts_032 で確認
-      - build success / crash 無し
-      - Info.plist の CFBundleIconName / UILaunchScreen.UIColorName / 各必須キーを fail-loud 通過
-      - 01-after-render.png で Launch Screen→MainView 遷移後の暗背景描画 (副作用なし)
-      - WAV は artifacts_029 と同等
+- [x] Phase 6 (3rd): push (ad178dd) → CI → artifacts_030 (Codemagic 番号は再採番) で **全通過** 🎉
+      - build success / install success / crash 無し
+      - Step 5 Info.plist fail-loud 検証 (CFBundleIdentifier / ShortVersionString / Version /
+        UIBackgroundModes[0] / UILaunchScreen.UIColorName / CFBundleIconName) 全 OK (Step 6 まで到達した事実から推定)
+      - 01-after-render.png で MainView が綺麗に描画 (4 mode / 4 voice / Sleep Timer すべて)
+      - 02-stopped.png で Playing 状態に遷移、Task 24 の mode dim 化も維持
+      - syslog で Task 24 NowPlayingService の Remote commands 登録 + setNowPlayingInfo (Title=Hypnoctone) を確認
+      - offline render frames: 797896 ≒ 18.09 秒、artifacts_029 と同等 (audio path 影響なし)
+      - 終了は SIGTERM (正常 kill)
 - [ ] Phase 7 (後続課題, Developer Program 加入後): 実機 Home/Settings/Spotlight で AppIcon の縮小視認性を確認
